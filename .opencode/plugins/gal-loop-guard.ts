@@ -40,15 +40,26 @@ const GalLoopGuard: Plugin = async ({ directory, client }) => {
         status:tool.schema.enum(['SUPPORTED','REFUTED','UNTESTED']).optional(),
         evidence:tool.schema.array(tool.schema.string()).optional(),
         signal:tool.schema.enum(['manual_verification','contradicted_baseline','advisor_approach_reuse','speculation','narrative_debugging','scope_drift','semantic_loop','assumption_lock','blast_radius']).optional(),
-      },async execute(args,ctx){return transaction(ctx.sessionID,g=>{g.report(args);return g.packet();});}}),
-      gal_recover: tool({description:'Commit GAL ACCEPT/REJECT, or REPAIR a NEXT execution that returned without a completion event. ACCEPT uses Advisor NEXT. REJECT/REPAIR require a valid different observation. read requires {filePath:string}; glob {pattern:string,path?:string}; grep {pattern:string,path?:string,include?:string}; bash is limited to simple git diff/status/show/log.',args:{
-        decision:tool.schema.enum(['ACCEPT','REJECT','REPAIR']),reason:tool.schema.string(),evidence:tool.schema.array(tool.schema.string()),
-        next_tool:tool.schema.enum(['read','glob','grep','bash']).optional(),next_args:tool.schema.record(tool.schema.string(),tool.schema.unknown()).optional(),
+      },async execute(args,ctx){return transaction(ctx.sessionID,g=>{g.report(args);return JSON.stringify(g.status());});}}),
+      gal_accept: tool({description:'Accept the Advisor NEXT MOVE. Supply only reason and current-episode evidence IDs; the stored Advisor NEXT is used automatically.',args:{
+        reason:tool.schema.string(),evidence:tool.schema.array(tool.schema.string()),
       },async execute(args,ctx){return transaction(ctx.sessionID,g=>{
-        const move=args.next_tool&&args.next_args?{tool:args.next_tool,args:args.next_args}:{tool:'',args:{}};
-        if(args.decision==='REPAIR') g.repair(args.reason,args.evidence,move);
-        else g.contract(args.decision,args.reason,args.evidence,move);
-        return 'GAL '+args.decision+'\nNEXT: '+JSON.stringify(g.s.move);
+        g.contract('ACCEPT',args.reason,args.evidence,{tool:'',args:{}});
+        return 'GAL ACCEPT\nPHASE=NEXT\nEXECUTE EXACTLY: '+JSON.stringify(g.s.move);
+      });}}),
+      gal_reject: tool({description:'Reject the Advisor NEXT MOVE using objective evidence and contract one different valid observation. read {filePath}; glob {pattern,path?}; grep {pattern,path?,include?}; bash only simple git diff/status/show/log.',args:{
+        reason:tool.schema.string(),evidence:tool.schema.array(tool.schema.string()),
+        next_tool:tool.schema.enum(['read','glob','grep','bash']),next_args:tool.schema.record(tool.schema.string(),tool.schema.unknown()),
+      },async execute(args,ctx){return transaction(ctx.sessionID,g=>{
+        g.contract('REJECT',args.reason,args.evidence,{tool:args.next_tool,args:args.next_args});
+        return 'GAL REJECT\nPHASE=NEXT\nEXECUTE EXACTLY: '+JSON.stringify(g.s.move);
+      });}}),
+      gal_repair: tool({description:'Repair only a NEXT_EXECUTING observation whose correct tool visibly returned a tool/schema/infrastructure error but no completion event. Contract one different valid observation.',args:{
+        reason:tool.schema.string(),evidence:tool.schema.array(tool.schema.string()),
+        next_tool:tool.schema.enum(['read','glob','grep','bash']),next_args:tool.schema.record(tool.schema.string(),tool.schema.unknown()),
+      },async execute(args,ctx){return transaction(ctx.sessionID,g=>{
+        g.repair(args.reason,args.evidence,{tool:args.next_tool,args:args.next_args});
+        return 'GAL REPAIR\nPHASE=NEXT\nEXECUTE EXACTLY: '+JSON.stringify(g.s.move);
       });}}),
     },
     'tool.execute.before':async(input,output)=>{
@@ -76,7 +87,7 @@ const GalLoopGuard: Plugin = async ({ directory, client }) => {
         if(input.tool.startsWith('gal_')) return;
         const note=g.observe(input.tool,input.args,output.output,exit);
         if(note) output.output+='\n'+note;
-        if(g.s.phase==='REQUIRED') output.output+='\nGAL GUARD TRIGGERED. Stop retries. Invoke task subagent_type=gal-advisor.\n'+g.packet();
+        if(g.s.phase==='REQUIRED') output.output+='\nGAL GUARD TRIGGERED. Stop retries. Invoke task subagent_type=gal-advisor.\n'+g.guardNotice();
       });
     },
     'experimental.chat.system.transform':async(input,output)=>{
@@ -85,8 +96,8 @@ const GalLoopGuard: Plugin = async ({ directory, client }) => {
         if(g.s.phase!=='RUNNING') {
           let msg='GAL '+g.s.phase+'. No retries or edits.';
           if(g.s.phase==='NEXT'&&g.s.move) msg+='\nEXECUTE NOW — tool: '+g.s.move.tool+', args: '+JSON.stringify(g.s.move.args)+'\nPreserve the contracted values. Safe optional read/grep/glob args may be added.';
-          else if(g.s.phase==='NEXT_EXECUTING') msg+='\nThe contracted observation started but completion was not observed. If the tool already returned a schema/infrastructure error, use gal_recover decision=REPAIR with current evidence and a different valid observation.';
-          else msg+=' '+g.packet()+'\n'+(g.s.advice??'');
+          else if(g.s.phase==='NEXT_EXECUTING') msg+='\nThe contracted observation started but completion was not observed. Do not use ACCEPT/REJECT here. Only if the correct NEXT visibly returned a tool/schema/infrastructure error without a completion event, call gal_repair with current evidence and a different valid observation.';
+          else msg+=' '+g.guardNotice();
           if(output.system.length>0) output.system[output.system.length-1]+='\n'+msg;
           else output.system.push(msg);
         }

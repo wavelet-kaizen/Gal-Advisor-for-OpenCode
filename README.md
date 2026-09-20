@@ -56,11 +56,13 @@ RUNNING → REQUIRED → CONSULTING → CONTRACT → NEXT → NEXT_EXECUTING →
 2. Guardが停止したら `task` の `subagent_type: gal-advisor` を呼びます。
    プラグインはプロンプトを診断パケットに置換し、`task_id` を取り除いてfresh contextを確保します。
 3. Advisorは6セクション、NEXT MOVEには `{"tool":"...","args":{...}}` を1個返します。
-4. 主エージェントは `gal_recover` にACCEPT/REJECT、理由、証拠ID、次のtool/argsを渡します。
-   ACCEPTはAdvisorの指定を使い、REJECTは異なる操作が必要です。REPAIRはNEXT_EXECUTINGのhook/infra異常時だけ使います。
+4. 主エージェントはdecision別ツールを使います。
+   `gal_accept(reason,evidence)` はAdvisorのNEXTをそのまま採用し、置換moveを入力できません。
+   `gal_reject(reason,evidence,next_tool,next_args)` は客観的根拠と、Advisorとは異なる有効な観測を必須にします。
+   `gal_repair` はNEXT_EXECUTINGで、正しい契約toolがtool/schema/infrastructure errorを返したのにcompletion hookだけ観測できなかった場合専用です。
 5. 指定した1操作はまず `NEXT_EXECUTING` に入り、その結果をGuardが観測してから通常作業へ戻ります。
-   NEXTのtool/argsが契約と違う場合は差分を表示してCONTRACTへ戻すため、誤ったNEXTで永久ロックしません。
-   ツール実行自体は返ったのにafter/error hookを観測できなかった場合だけ、`gal_recover decision=REPAIR` で別の観測へ差し替えられます。
+   正常に観測するとtool出力へ `GAL RECOVERY COMPLETE ... phase=RUNNING` を追記します。
+   NEXTのtool/argsが契約と違う場合、そのtoolは実行せず `phase_after=CONTRACT / move_cleared=true / REPAIR=false` を明示して戻します。
 
 同じ問題の相談は最大2回です。問題キーは現在のfailure種別・診断・ファイル・位置から作り、独立したfailureへ変わると新しいepisodeと相談予算になります。
 同じ問題で前回と観測証拠が同じなら再相談を拒否しEXHAUSTEDにします。
@@ -93,6 +95,8 @@ bash内のファイル編集、変更の往復を完全に自動検出するも�
 
 問題キーはfailure種別・正規化した診断・ファイル・位置のepisode signatureを基準にします。
 同じ問題でコマンドを言い換えて相談予算を迂回しにくくしつつ、明確に異なるfailureは別episodeとして扱います。
+Guardの停止メッセージはraw evidenceを含まないcompact stateだけを返します。Advisorへ渡す診断packetだけがevidence本文を含み、
+最大12件・各1200文字に制限します。これにより停止エラーやsystem injectionが巨大化して後続toolのJSON上限を圧迫しにくくします。
 証拠パケットも現在episode以降の証拠だけをAdvisorへ渡します。検出器は一般的な出力のヒューリスティックであり、誤検知し得ます。
 証拠IDの存在と契約の構造は検証しますが、却下理由の技術的妥当性は診断モデル・ユーザーの判断です。
 
@@ -123,7 +127,7 @@ NEXTの二段階実行・不一致解除・REPAIR、壊れた永続stateの修�
 
 `gal_status` のmetricsにはtool_calls、triggers、progress、gal_invocations、
 advisor_accept/reject/repair、advisor_exhausted、recovery_starts、recovery_observations、next_contract_mismatches、
-state_repairs、state_migrations、unrelated_edits、shell_mismatches、cli_usage_errorsを記録します.
+state_repairs、state_migrations、unrelated_edits、shell_mismatches、cli_usage_errorsを記録します。
 false_positive判定や解決率は自動推定しません。
 
 ## API根拠

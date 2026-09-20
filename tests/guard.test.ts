@@ -39,7 +39,7 @@ test('ACCEPT requires evidence; mismatched NEXT cancels and correct NEXT execute
   // A mismatched call cancels the bad contract and returns to CONTRACT with a precise delta.
   assert.throws(
     ()=>g.before('gal_recover',{decision:'ACCEPT'}),
-    /GAL GUARD NEXT MISMATCH: tool expected bash but received gal_recover/
+    /GAL GUARD NEXT MISMATCH: tool expected bash but received gal_recover.*phase_after=CONTRACT.*REPAIR=false/
   );
   assert.equal(g.s.phase,'CONTRACT');
   assert.equal(g.s.move,undefined);
@@ -49,8 +49,9 @@ test('ACCEPT requires evidence; mismatched NEXT cancels and correct NEXT execute
   g.before(next.tool,next.args);
   assert.equal(g.s.phase,'NEXT_EXECUTING');
   assert.throws(()=>g.before(next.tool,next.args),/GAL GUARD NEXT_EXECUTING/);
-  g.observe(next.tool,next.args,'changed closing bracket',0);
+  const note=g.observe(next.tool,next.args,'changed closing bracket',0);
   assert.equal(g.s.phase,'RUNNING');
+  assert.match(note??'',/GAL RECOVERY COMPLETE: contracted bash result observed; phase=RUNNING/);
 });
 test('no new evidence means exhausted; budget survives JSON reload',()=>{
   const g=stuck();g.consult();g.advised(advice);g.contract('ACCEPT','inspect',['e1'],next);
@@ -287,4 +288,39 @@ test('legacy evidence cannot be reused as current-problem hypothesis evidence af
     ()=>migrated.report({hypothesis:'reuse old evidence',status:'SUPPORTED',evidence:['e1']}),
     /Current-problem evidence IDs required/
   );
+});
+
+test('guard notice stays compact and advisor packet is bounded with large evidence',()=> {
+  const g=new Guard();
+  for(let i=0;i<24;i++) g.observe('read',{filePath:'f'+i+'.ts'},'RAW-'+i+'-'+('x'.repeat(2990)));
+  g.trigger('manual_verification');
+  const notice=g.guardNotice();
+  const packet=g.packet();
+  assert.ok(notice.length<3000,'guard notice must remain small');
+  assert.doesNotMatch(notice,/RAW-/,'guard notice must not contain raw evidence output');
+  assert.ok(packet.length<30000,'advisor packet must stay well below common 64 KiB record limits');
+  const parsed=JSON.parse(packet);
+  assert.equal(parsed.evidence.length,12);
+  assert.equal(parsed.evidenceOmitted,12);
+  assert.ok(parsed.evidence.every((e:any)=>e.output.length<=1200));
+});
+
+test('real recovery sequence: mismatch cancels, re-contract correct grep, then explicit completion ACK',()=> {
+  const grepAdvice='DIAGNOSIS\nテストstateを確認。\nDEAD ASSUMPTION\n順序は無関係\nEVIDENCE\ne1\nNEXT MOVE\n{"tool":"grep","args":{"pattern":"notifyPressure","path":"web/js"}}\nEXPECTED RESULT\nsetter/callerを分離\nDO NOT\n先に編集しない';
+  const g=stuck();g.consult();g.advised(grepAdvice);g.contract('ACCEPT','inspect pressure path',['e1'],{tool:'',args:{}});
+  assert.throws(()=>g.before('edit',{filePath:'scripts/memory_regression.js'}),/tool expected grep but received edit.*phase_after=CONTRACT.*move_cleared=true.*REPAIR=false/);
+  assert.equal(g.s.phase,'CONTRACT');assert.equal(g.s.move,undefined);
+  g.contract('ACCEPT','retry exact advisor observation',['e1'],{tool:'',args:{}});
+  const move={tool:'grep',args:{pattern:'notifyPressure',path:'web/js'}};
+  g.before(move.tool,move.args);
+  assert.equal(g.s.phase,'NEXT_EXECUTING');
+  const note=g.observe(move.tool,move.args,'web/js/api.js:1115\nweb/js/memory.js:247',0);
+  assert.equal(g.s.phase,'RUNNING');
+  assert.match(note??'',/GAL RECOVERY COMPLETE: contracted grep result observed; phase=RUNNING/);
+});
+
+test('NEXT mismatch explicitly says REPAIR is not the recovery path',()=> {
+  const g=stuck();g.consult();g.advised(advice);g.contract('ACCEPT','inspect',['e1'],{tool:'',args:{}});
+  assert.throws(()=>g.before('edit',{filePath:'a.ts'}),/REPAIR=false/);
+  assert.equal(g.s.phase,'CONTRACT');
 });

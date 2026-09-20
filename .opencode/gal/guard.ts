@@ -220,11 +220,29 @@ export class Guard {
   trigger(reason:string) {if(this.s.phase==='RUNNING') {this.s.phase='REQUIRED';this.s.reason=reason;this.metric('triggers');}}
   exhaust(reason:string) {this.s.phase='EXHAUSTED';this.s.reason=reason;this.metric('advisor_exhausted');}
   packet() {
+    const all=this.episodeEvidence();
+    const evidence=all.slice(-12).map(e=>({...e,output:e.output.slice(0,1200)}));
     return JSON.stringify({
       type:'GAL DIAGNOSTIC PACKET',goal:this.s.goal||'(unreported)',problem:this.s.problem,reason:this.s.reason,
       failure:{kind:this.s.failureKind,file:this.s.failureFile||undefined},episodeStartTick:this.s.episodeStartTick,
-      evidence:this.episodeEvidence(),hypotheses:this.s.hypotheses,
+      evidence,evidenceOmitted:Math.max(0,all.length-evidence.length),hypotheses:this.s.hypotheses,
       question:'Return exactly one evidence-based observation as NEXT MOVE.'
+    });
+  }
+  guardNotice() {
+    const evidence=this.episodeEvidence().map(e=>e.id);
+    const nextAction=
+      this.s.phase==='REQUIRED'?'invoke task with subagent_type=gal-advisor':
+      this.s.phase==='CONSULTING'?'wait for the advisor result; do not run project tools':
+      this.s.phase==='CONTRACT'?'call gal_accept to use Advisor NEXT, or gal_reject with one different valid observation; do not execute NEXT before contracting':
+      this.s.phase==='NEXT'?'execute the contracted NEXT exactly once':
+      this.s.phase==='NEXT_EXECUTING'?'wait for the contracted result; use gal_repair only if the correct NEXT visibly returned a tool/schema/infrastructure error but no completion was observed':
+      this.s.phase==='EXHAUSTED'?'stop autonomous debugging and report facts to the user':
+      'continue normal work';
+    return JSON.stringify({
+      type:'GAL GUARD STATE',phase:this.s.phase,reason:this.s.reason,
+      failure:{kind:this.s.failureKind,file:this.s.failureFile||undefined},
+      evidence,advisorMoveError:this.s.advisorMoveError,nextAction
     });
   }
   report(input:{goal?:string; hypothesis?:string; status?:string; evidence?:string[]; signal?:string}) {
@@ -293,8 +311,8 @@ export class Guard {
     if(tool==='gal_status') return;
     if(this.s.phase==='EXHAUSTED') throw Error('GAL EXHAUSTED: stop autonomous debugging and report facts to user. '+this.s.reason);
     if(tool==='gal_report'&&this.s.phase==='RUNNING') return;
-    if(tool==='gal_recover'&&this.s.phase==='CONTRACT') return;
-    if(tool==='gal_recover'&&this.s.phase==='NEXT_EXECUTING'&&args.decision==='REPAIR') return;
+    if(['gal_accept','gal_reject'].includes(tool)&&this.s.phase==='CONTRACT') return;
+    if(tool==='gal_repair'&&this.s.phase==='NEXT_EXECUTING') return;
     if(tool==='task'&&args.subagent_type==='gal-advisor'&&['RUNNING','REQUIRED'].includes(this.s.phase)) return;
     if(this.s.phase==='NEXT'&&this.s.move) {
       if(matchesMove(this.s.move,tool,args)) {
@@ -302,14 +320,15 @@ export class Guard {
       }
       const detail=mismatchDetails(this.s.move,tool,args);
       this.s.move=undefined;this.s.executing=undefined;this.s.phase='CONTRACT';this.metric('next_contract_mismatches');
-      throw Error('GAL GUARD NEXT MISMATCH: '+detail+'. Recovery contract was cancelled; call gal_recover again with a valid observation.');
+      throw Error('GAL GUARD NEXT MISMATCH: '+detail+'. phase_after=CONTRACT; move_cleared=true; REPAIR=false. The attempted tool did not run. Call gal_accept to retry the Advisor NEXT, or gal_reject with a different valid observation.');
     }
-    if(this.s.phase==='NEXT_EXECUTING') throw Error('GAL GUARD NEXT_EXECUTING: the contracted observation started but completion was not observed. If OpenCode already returned a tool/schema/infrastructure error, call gal_recover with decision=REPAIR and a different valid observation.');
-    if(this.s.phase!=='RUNNING') throw Error('GAL GUARD '+this.s.phase+': '+this.packet());
+    if(this.s.phase==='NEXT_EXECUTING') throw Error('GAL GUARD NEXT_EXECUTING: the contracted observation started but completion was not observed. REPAIR is valid only if the correct NEXT visibly returned a tool/schema/infrastructure error without a completion event; then call gal_repair with a different valid observation.');
+    if(this.s.phase!=='RUNNING') throw Error('GAL GUARD '+this.s.phase+': '+this.guardNotice());
   }
   observe(tool:string,args:Record<string,unknown>,output:string,exit?:number):string|undefined {
+    let recovered=false;
     if(this.s.phase==='NEXT_EXECUTING'&&this.s.move&&matchesMove(this.s.move,tool,args)) {
-      this.s.phase='RUNNING';this.s.move=undefined;this.s.executing=undefined;this.resetLoopCounters();this.metric('recovery_observations');
+      recovered=true;this.s.phase='RUNNING';this.s.move=undefined;this.s.executing=undefined;this.resetLoopCounters();this.metric('recovery_observations');
     }
     this.s.tick++;this.metric('tool_calls');
     const clean=output.replace(/\u001b\[[0-9;]*m/g,'').replace(/\r/g,'');
@@ -372,6 +391,10 @@ export class Guard {
       if(this.s.repeats[search]>=3) this.trigger('repeated_search_no_new_evidence');
     }
     this.s.previous=key;this.s.previousMove={tool,args};
+    if(recovered) {
+      const ack='GAL RECOVERY COMPLETE: contracted '+tool+' result observed; phase='+this.s.phase+'. Normal tools are allowed again.';
+      note=note?ack+'\n'+note:ack;
+    }
     return note;
   }
 }

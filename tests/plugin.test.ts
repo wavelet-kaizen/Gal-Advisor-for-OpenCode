@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdtemp, rm, readFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, dirname, resolve } from 'node:path';
 import plugin from '../.opencode/plugins/gal-loop-guard.ts';
@@ -46,7 +46,8 @@ test('system.transform appends to existing system message instead of pushing a n
     assert.equal(output.system.length,1,'system array must stay length 1 to avoid multi-system-message Jinja errors');
     assert.match(output.system[0],/helpful coding assistant/,'original system prompt must be preserved');
     assert.match(output.system[0],/GAL REQUIRED/,'GAL state must be appended');
-    assert.match(output.system[0],/GAL DIAGNOSTIC PACKET/,'diagnostic packet must be included');
+    assert.match(output.system[0],/GAL GUARD STATE/,'compact guard state must be included');
+    assert.doesNotMatch(output.system[0],/SyntaxError: bad token/,'system guard state must not repeat raw evidence');
   } finally {
     assert.equal(dirname(resolve(directory)),resolve(tmpdir()));
     assert.match(directory,/gal-systransform-[^\\/]+$/);
@@ -108,4 +109,43 @@ test('gal_status is compact by default and raw only on explicit request',async()
     assert.match(directory,/gal-status-[^\\/]+$/);
     await rm(directory,{recursive:true,force:true});
   }
+});
+
+test('recovery tools have decision-specific schemas and legacy gal_recover is absent',async()=>{
+  const directory=await mkdtemp(join(tmpdir(),'gal-tools-'));
+  try {
+    const ctx={directory,client:{session:{messages:async()=>({data:[{info:{role:'user',agent:'build'}}]})}}} as unknown as PluginInput;
+    const hooks=await plugin(ctx);
+    const tools=(hooks as any).tool;
+    assert.ok(tools.gal_accept&&tools.gal_reject&&tools.gal_repair);
+    assert.equal(tools.gal_recover,undefined);
+    assert.deepEqual(Object.keys(tools.gal_accept.args).sort(),['evidence','reason']);
+    assert.deepEqual(Object.keys(tools.gal_reject.args).sort(),['evidence','next_args','next_tool','reason']);
+    assert.deepEqual(Object.keys(tools.gal_repair.args).sort(),['evidence','next_args','next_tool','reason']);
+  } finally {
+    await rm(directory,{recursive:true,force:true});
+  }
+});
+
+test('gal_report returns compact status rather than a raw advisor packet',async()=>{
+  const directory=await mkdtemp(join(tmpdir(),'gal-report-'));
+  try {
+    const ctx={directory,client:{session:{messages:async()=>({data:[{info:{role:'user',agent:'build'}}]})}}} as unknown as PluginInput;
+    const hooks=await plugin(ctx);
+    const tools=(hooks as any).tool;
+    const out=JSON.parse(String(await tools.gal_report.execute({goal:'goal'}, {sessionID:'report'})));
+    assert.equal(out.phase,'RUNNING');
+    assert.equal(out.goal,'goal');
+    assert.equal(out.type,undefined);
+    assert.ok(Array.isArray(out.evidence));
+  } finally {
+    await rm(directory,{recursive:true,force:true});
+  }
+});
+
+test('advisor prompt requires scoped grep when a relevant path is known',async()=>{
+  const prompt=await readFile(new URL('../.opencode/agents/gal-advisor.md',import.meta.url),'utf8');
+  assert.match(prompt,/include the narrowest useful "path"/);
+  assert.match(prompt,/Use repo-wide grep only when the location is genuinely unknown/);
+  assert.match(prompt,/"pattern":"notifyPressure\|pressureDue","path":"web\/js"/);
 });

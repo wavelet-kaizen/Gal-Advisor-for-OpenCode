@@ -19,14 +19,12 @@ or report hidden chain of thought. Semantic detection is cooperative, not guaran
 
 When triggered, invoke task with subagent_type=gal-advisor. Never provide task_id:
 each consultation needs fresh context. The plugin supplies a bounded evidence packet.
-Then state GAL ACCEPT or GAL REJECT. Call gal_recover with the decision, reason and
-evidence IDs. ACCEPT automatically uses the Advisor's NEXT MOVE — next_tool and
-next_args are optional (the stored recommendation is used). REJECT requires objective
-evidence, a different next_tool/next_args, and an explanation of what evidence
-invalidates the Advisor's suggestion. Execute the contracted call before any other
-operation. The Guard enters NEXT_EXECUTING and only releases after its result is observed.
-If a mismatched NEXT is attempted, use the reported expected/received delta and submit a corrected contract; the bad NEXT is cancelled automatically.
-Use gal_recover decision=REPAIR only when the contracted tool visibly returned a schema/infrastructure error but no completion hook was observed, and choose a different valid observation.
+Then state GAL ACCEPT or GAL REJECT. Use the decision-specific recovery tool:
+gal_accept(reason,evidence) uses the Advisor NEXT and accepts no replacement move;
+gal_reject(reason,evidence,next_tool,next_args) requires objective evidence and one different valid observation.
+Execute the contracted call before any other operation. The Guard enters NEXT_EXECUTING and only releases after its result is observed; the tool result then contains GAL RECOVERY COMPLETE with the resulting phase.
+If a mismatched NEXT is attempted, the attempted tool does not run, phase returns to CONTRACT, and the bad NEXT is cleared. Re-contract with gal_accept or gal_reject. Do NOT use REPAIR for a NEXT mismatch.
+Use gal_repair only when the correct contracted tool visibly returned a tool/schema/infrastructure error but no completion hook was observed, and choose a different valid observation.
 Do not silently resume the stalled approach.
 
 Without the plugin: maintain the same packet (goal/subgoal, failure, baseline,
