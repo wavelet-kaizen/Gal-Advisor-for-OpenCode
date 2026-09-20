@@ -41,7 +41,7 @@ const GalLoopGuard: Plugin = async ({ directory, client }) => {
         evidence:tool.schema.array(tool.schema.string()).optional(),
         signal:tool.schema.enum(['manual_verification','contradicted_baseline','advisor_approach_reuse','speculation','narrative_debugging','scope_drift','semantic_loop','assumption_lock','blast_radius']).optional(),
       },async execute(args,ctx){return transaction(ctx.sessionID,g=>{g.report(args);return g.packet();});}}),
-      gal_recover: tool({description:'Commit GAL ACCEPT/REJECT with objective evidence IDs and exactly one next observation. ACCEPT uses the Advisor NEXT MOVE automatically; REJECT requires a different next_tool and next_args.',args:{
+      gal_recover: tool({description:'Commit GAL ACCEPT/REJECT with objective evidence IDs and exactly one next observation. ACCEPT uses the Advisor NEXT MOVE automatically. For REJECT: read requires {filePath:string}; glob {pattern:string,path?:string}; grep {pattern:string,path?:string,include?:string}; bash is limited to simple git diff/status/show/log.',args:{
         decision:tool.schema.enum(['ACCEPT','REJECT']),reason:tool.schema.string(),evidence:tool.schema.array(tool.schema.string()),
         next_tool:tool.schema.enum(['read','glob','grep','bash']).optional(),next_args:tool.schema.record(tool.schema.string(),tool.schema.unknown()).optional(),
       },async execute(args,ctx){return transaction(ctx.sessionID,g=>{

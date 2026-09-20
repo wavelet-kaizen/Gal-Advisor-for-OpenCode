@@ -97,3 +97,37 @@ test('REJECT requires a different move from recommended',()=>{
   g.contract('REJECT','different approach',['e1'],{tool:'grep',args:{pattern:'choices',path:'tests'}});
   assert.equal(g.s.phase,'NEXT');
 });
+test('malformed REJECT args are rejected before NEXT so recovery cannot self-lock',()=> {
+  const g=stuck();g.consult();g.advised(advice);
+  assert.throws(()=>g.contract('REJECT','inspect source',['e1'],{tool:'read',args:{filePath:{type:'string',value:'a.ts'}} as any}),/filePath must be a non-empty string/);
+  assert.equal(g.s.phase,'CONTRACT');
+  assert.equal(g.s.move,undefined);
+});
+test('contracted read accepts safe optional args while preserving contracted values',()=> {
+  const g=stuck();g.consult();g.advised(advice);
+  const readMove={tool:'read',args:{filePath:'a.ts'}};
+  g.contract('REJECT','inspect source',['e1'],readMove);
+  g.before('read',{filePath:'a.ts',limit:300});
+  g.observe('read',{filePath:'a.ts',limit:300},'source');
+  assert.equal(g.s.phase,'RUNNING');
+});
+test('invalid Advisor bash recommendation stays recoverable via REJECT',()=> {
+  const invalid=advice.replace('git diff HEAD -- tests/image-translation.test.cjs','python scripts\\\\android_notification_regression.py 2>&1');
+  const g=stuck();g.consult();g.advised(invalid);
+  assert.equal(g.s.phase,'CONTRACT');
+  assert.equal(g.s.recommended,undefined);
+  assert.match(g.s.advisorMoveError??'',/Recovery bash permits only simple git inspection/);
+  assert.throws(()=>g.contract('ACCEPT','run advisor move',['e1'],{tool:'',args:{}}),/Use REJECT with a valid observation/);
+  g.contract('REJECT','inspect the script instead',['e1'],{tool:'read',args:{filePath:'scripts/android_notification_regression.py'}});
+  assert.equal(g.s.phase,'NEXT');
+});
+test('different generic CLI usage errors do not collapse into one failure class',()=> {
+  const g=new Guard();
+  g.observe('bash',{command:'openspec status --json'},"error: unknown option '--foo'",1);
+  g.observe('edit',{filePath:'a.ts'},'ok');
+  g.observe('bash',{command:'openspec validate --change x'},"error: unknown option '--change'",1);
+  g.observe('edit',{filePath:'a.ts'},'ok');
+  g.observe('bash',{command:'openspec archive --bad'},"error: unknown option '--bad'",1);
+  assert.equal(g.s.phase,'RUNNING');
+  assert.equal(g.s.failures,0);
+});

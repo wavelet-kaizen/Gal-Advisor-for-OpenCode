@@ -7,6 +7,40 @@ export function stable(v: unknown): string {
   return JSON.stringify(v) ?? 'null';
 }
 export type Move = { tool: string; args: Record<string, unknown> };
+
+const RECOVERY_TOOLS=new Set(['read','glob','grep','bash']);
+const simpleGit=/^git (?:diff|status|show|log)(?: [a-zA-Z0-9_./:@{},+ -]+)?$/;
+const dangerousGit=/--(?:output|ext-diff|textconv|config)/;
+function requireString(args:Record<string,unknown>,key:string) {
+  const value=args[key];
+  if(typeof value!=='string'||!value.trim()) throw Error(`NEXT ${key} must be a non-empty string`);
+}
+function optionalString(args:Record<string,unknown>,key:string) {
+  const value=args[key];
+  if(value!==undefined&&typeof value!=='string') throw Error(`NEXT ${key} must be a string when provided`);
+}
+function optionalNumber(args:Record<string,unknown>,key:string) {
+  const value=args[key];
+  if(value!==undefined&&(typeof value!=='number'||!Number.isFinite(value)||value<0)) throw Error(`NEXT ${key} must be a non-negative number when provided`);
+}
+export function validateMove(move:Move) {
+  if(!move||typeof move.tool!=='string'||!move.args||Array.isArray(move.args)||typeof move.args!=='object') throw Error('NEXT must contain one tool and args object');
+  if(!RECOVERY_TOOLS.has(move.tool)) throw Error('NEXT must be one observation tool');
+  if(move.tool==='read') {requireString(move.args,'filePath');optionalNumber(move.args,'offset');optionalNumber(move.args,'limit');}
+  if(move.tool==='glob') {requireString(move.args,'pattern');optionalString(move.args,'path');}
+  if(move.tool==='grep') {requireString(move.args,'pattern');optionalString(move.args,'path');optionalString(move.args,'include');}
+  if(move.tool==='bash') {
+    requireString(move.args,'command');
+    const command=String(move.args.command);
+    if(!simpleGit.test(command)||dangerousGit.test(command)) throw Error('Recovery bash permits only simple git inspection; use read/grep otherwise');
+  }
+  return move;
+}
+function matchesMove(expected:Move,tool:string,args:Record<string,unknown>) {
+  if(tool!==expected.tool) return false;
+  try {validateMove({tool,args});} catch {return false;}
+  return Object.entries(expected.args).every(([key,value])=>stable(args[key])===stable(value));
+}
 type Evidence = { id: string; tool: string; args: Record<string, unknown>; output: string; signature: string };
 export type State = {
   phase: 'RUNNING'|'REQUIRED'|'CONSULTING'|'CONTRACT'|'NEXT'|'EXHAUSTED';
@@ -14,7 +48,7 @@ export type State = {
   failure: string; failures: number; failedCount?: number; lastEdit: number; revision: number;
   evidence: Evidence[]; repeats: Record<string,number>; calls: Record<string,{count:number; evidence:string}>;
   hypotheses: Record<string,{status:string; evidence:string[]}>;
-  signals: {name:string; tick:number}[]; advice?: string; recommended?: Move; move?: Move; previous?: string;
+  signals: {name:string; tick:number}[]; advice?: string; recommended?: Move; advisorMoveError?: string; move?: Move; previous?: string;
   metrics: Record<string,number>;
 };
 export const initial = (): State => ({phase:'RUNNING',goal:'',problem:'',reason:'',tick:0,edits:0,failure:'',failures:0,lastEdit:0,revision:0,evidence:[],repeats:{},calls:{},hypotheses:{},signals:[],metrics:{}});
@@ -60,23 +94,26 @@ export class Guard {
     if(!['DIAGNOSIS','DEAD ASSUMPTION','EVIDENCE','NEXT MOVE','EXPECTED RESULT','DO NOT'].every(x=>text.includes(x))) {
       this.exhaust('Advisor returned invalid or failed diagnosis');return;
     }
-    this.s.advice=text.slice(0,12000);this.s.phase='CONTRACT';
+    this.s.advice=text.slice(0,12000);this.s.phase='CONTRACT';this.s.recommended=undefined;this.s.advisorMoveError=undefined;
     try {
       const section=text.split('NEXT MOVE')[1].split('EXPECTED RESULT')[0];
       const json=section.slice(section.indexOf('{'),section.lastIndexOf('}')+1);
-      const move=JSON.parse(json);
-      if(typeof move.tool!=='string'||!move.args||Array.isArray(move.args)||typeof move.args!=='object') throw Error('Invalid move');
+      const move=JSON.parse(json) as Move;
+      validateMove(move);
       this.s.recommended=move;
-    } catch {this.exhaust('NEXT MOVE must contain exactly one JSON tool/args object');}
+    } catch(e) {
+      this.s.advisorMoveError=e instanceof Error?e.message:String(e);
+      this.metric('advisor_invalid_moves');
+    }
   }
   contract(decision:string, reason:string, evidence:string[], move:Move) {
     if(this.s.phase!=='CONTRACT') throw Error('No pending recovery contract');
     if(!reason.trim() || !this.refs(evidence)) throw Error('Reason and observed evidence IDs required');
     if(!['ACCEPT','REJECT'].includes(decision)) throw Error('ACCEPT or REJECT required');
-    const effective=decision==='ACCEPT' && this.s.recommended ? this.s.recommended : move;
+    if(decision==='ACCEPT'&&!this.s.recommended) throw Error('Advisor NEXT MOVE is invalid or unavailable'+(this.s.advisorMoveError?': '+this.s.advisorMoveError:'')+'. Use REJECT with a valid observation.');
+    const effective=decision==='ACCEPT' ? this.s.recommended! : move;
+    validateMove(effective);
     if(decision==='REJECT' && this.s.recommended && hash(effective)===hash(this.s.recommended)) throw Error('REJECT requires a different observation');
-    if(!['read','glob','grep','bash'].includes(effective.tool)) throw Error('NEXT must be one observation tool');
-    if(effective.tool==='bash' && (!/^git (?:diff|status|show|log)(?: [a-zA-Z0-9_./:@{},+ -]+)?$/.test(String(effective.args.command??'')) || /--(?:output|ext-diff|textconv|config)/.test(String(effective.args.command)))) throw Error('Recovery bash permits only simple git inspection; use read/grep otherwise');
     if(hash(effective)===this.s.previous) throw Error('NEXT must differ from the previous stalled operation');
     this.s.move=effective;this.s.phase='NEXT';this.metric('advisor_'+decision.toLowerCase());
   }
@@ -86,8 +123,8 @@ export class Guard {
     if(tool==='gal_report' && this.s.phase==='RUNNING') return;
     if(tool==='gal_recover' && this.s.phase==='CONTRACT') return;
     if(tool==='task' && args.subagent_type==='gal-advisor' && ['RUNNING','REQUIRED'].includes(this.s.phase)) return;
-    if(this.s.phase==='NEXT' && hash({tool,args})===hash(this.s.move)) {this.s.move=undefined;return;}
-    if(this.s.phase==='NEXT' && this.s.move) throw Error('GAL GUARD NEXT: Execute the contracted observation now. Do not call gal_recover again.\nTOOL: '+this.s.move.tool+'\nARGS: '+JSON.stringify(this.s.move.args));
+    if(this.s.phase==='NEXT' && this.s.move && matchesMove(this.s.move,tool,args)) {this.s.move=undefined;return;}
+    if(this.s.phase==='NEXT' && this.s.move) throw Error('GAL GUARD NEXT: Execute the contracted observation now. Contracted values must be preserved; safe optional read/grep/glob args may be added.\nTOOL: '+this.s.move.tool+'\nARGS: '+JSON.stringify(this.s.move.args));
     if(this.s.phase!=='RUNNING') throw Error('GAL GUARD '+this.s.phase+': '+this.packet());
   }
   observe(tool:string,args:Record<string,unknown>,output:string,exit?:number) {
@@ -101,12 +138,14 @@ export class Guard {
     }
     if(['edit','write','apply_patch','patch'].includes(tool)) {this.s.revision++;this.s.edits++;return;}
     const error=clean.match(/(?:SyntaxError|AssertionError|TypeError|ReferenceError|Error):[^\n]*/)?.[0];
+    const diagnostic=error??clean.split('\n').map(x=>x.trim()).find(x=>/^(?:error|fatal|panic|failed|failure|usage:)/i.test(x)||/(?:command not found|is not recognized)/i.test(x))??'nonzero';
     const count=clean.match(/# fail (\d+)|Tests:\s+(\d+) failed/);
     const failedCount=count?Number(count[1]??count[2]):undefined;
     const failed=exit!==undefined ? exit!==0 : (tool==='bash'&&(!!error||(failedCount!==undefined&&failedCount>0)));
     const key=hash({tool,args});
     const location=clean.match(/([^\s()]+\.(?:[cm]?[jt]s|tsx|py)):(\d+)/);
-    const failure=hash({error:error??'nonzero',file:location?.[1],bucket:location?Math.floor(Number(location[2])/10):undefined});
+    const commandFamily=tool==='bash'?String(args.command??'').trim().split(/\s+/).slice(0,2).join(' '):tool;
+    const failure=hash({diagnostic,file:location?.[1],bucket:location?Math.floor(Number(location[2])/10):undefined,commandFamily});
     const improved=failedCount!==undefined&&this.s.failedCount!==undefined&&failedCount<this.s.failedCount;
     const sameFailure=failure===this.s.failure;
     if(failed) {

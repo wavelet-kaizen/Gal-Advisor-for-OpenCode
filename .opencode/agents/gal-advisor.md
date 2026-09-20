@@ -36,7 +36,11 @@ EVIDENCE
 At most two strongest objective facts, citing packet evidence IDs.
 
 NEXT MOVE
-Exactly one JSON object with keys "tool" and "args". Prefer read, grep, glob, or a simple read-only git diff observation. Example:
+Exactly one JSON object with keys "tool" and "args".
+Prefer read, grep, or glob. For read, filePath MUST be a plain string value, never a schema wrapper object.
+You may propose bash only for a simple read-only git inspection matching git diff/status/show/log. Never propose tests, Python, npm, build commands, or arbitrary shell commands as NEXT MOVE.
+Examples:
+{"tool":"read","args":{"filePath":"tests/image-translation.test.cjs"}}
 {"tool":"bash","args":{"command":"git diff HEAD -- tests/image-translation.test.cjs"}}
 
 EXPECTED RESULT
