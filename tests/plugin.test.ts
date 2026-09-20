@@ -148,6 +148,8 @@ test('advisor prompt requires scoped grep when a relevant path is known',async()
   assert.match(prompt,/include the narrowest useful "path"/);
   assert.match(prompt,/Use repo-wide grep only when the location is genuinely unknown/);
   assert.match(prompt,/"pattern":"notifyPressure\|pressureDue","path":"web\/js"/);
+  assert.match(prompt,/investigation_stall_no_new_evidence/);
+  assert.match(prompt,/smallest unresolved factual question/);
 });
 
 test('plugin forces autonomous goal registration before first edit or verification',async()=>{
