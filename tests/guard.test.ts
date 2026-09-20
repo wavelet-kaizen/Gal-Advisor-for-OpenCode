@@ -385,6 +385,41 @@ test('investigation novelty is scoped by subject and materially changed output',
   assert.equal(g.s.metrics.investigation_stall_triggers,undefined);
 });
 
+test('glob and grep query identity prevent empty-result investigation false positives',()=> {
+  const g=new Guard();
+  g.report({goal:'Map implementation and test locations before editing'});
+  const globPatterns=[
+    'web/js/*.js',
+    'android/app/src/main/java/com/ryza/chat/*.java',
+    'test/**/*.js',
+    '**/*test*',
+    'scripts/*.js',
+    'android/app/src/test/**/*.kt',
+    'android/app/src/test/**/*.java',
+  ];
+  for(const pattern of globPatterns) g.observe('glob',{pattern},'No files found');
+  assert.equal(g.s.phase,'RUNNING','different glob patterns with the same empty output are distinct observations');
+  assert.equal(g.s.metrics.investigation_stall_triggers,undefined);
+
+  for(const pattern of ['queueSettle','setSummaryHooks','notifyPressure','pressureDue']) {
+    g.observe('grep',{pattern,path:'web/js'},'No matches found');
+  }
+  assert.equal(g.s.phase,'RUNNING','different grep patterns in the same path are distinct observations');
+  assert.equal(g.s.metrics.investigation_stall_triggers,undefined);
+  assert.ok(g.s.investigation.every(x=>!x.stale));
+});
+
+test('repeating the same empty glob query still triggers investigation stall',()=> {
+  const g=new Guard();
+  g.report({goal:'Locate Android notification tests'});
+  const args={pattern:'android/app/src/test/**/*.java'};
+  for(let i=0;i<4;i++) g.observe('glob',args,'No files found');
+  assert.equal(g.s.phase,'REQUIRED');
+  assert.equal(g.s.reason,'investigation_stall_no_new_evidence');
+  assert.equal(g.s.metrics.investigation_stale_observations,3);
+  assert.equal(g.s.metrics.investigation_stall_triggers,1);
+});
+
 test('an edit resets low-novelty investigation history',()=> {
   const g=new Guard();
   g.report({goal:'Investigate then fix one issue'});

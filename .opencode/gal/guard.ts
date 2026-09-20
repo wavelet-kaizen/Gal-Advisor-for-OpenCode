@@ -86,8 +86,18 @@ function commandFamily(tool:string,args:Record<string,unknown>) {
   return String(args.command??'').trim().split(/\s+/).slice(0,2).join(' ');
 }
 function investigationSubject(tool:string,args:Record<string,unknown>,clean:string) {
-  const direct=tool==='read'?args.filePath:(tool==='grep'||tool==='glob')?args.path:undefined;
-  if(typeof direct==='string'&&direct.trim()) return normPath(direct).toLowerCase();
+  if(tool==='read'&&typeof args.filePath==='string'&&args.filePath.trim()) {
+    return normPath(String(args.filePath)).toLowerCase();
+  }
+  if(tool==='glob') {
+    const scope=typeof args.path==='string'&&args.path.trim()?normPath(String(args.path)).toLowerCase():'.';
+    return 'glob:'+scope+':'+String(args.pattern??'').trim();
+  }
+  if(tool==='grep') {
+    const scope=typeof args.path==='string'&&args.path.trim()?normPath(String(args.path)).toLowerCase():'.';
+    const include=typeof args.include==='string'&&args.include.trim()?String(args.include).trim():'*';
+    return 'grep:'+scope+':'+include+':'+String(args.pattern??'').trim();
+  }
   const location=clean.match(/(?:^|\s)((?:[A-Za-z]:[\\/]|\.{0,2}[\\/])?[A-Za-z0-9_@./\\-]+\.(?:[cm]?[jt]s|tsx|py|java|md|json))(?:[:(]\d+)?/m);
   if(location) return normPath(location[1]).toLowerCase();
   return tool==='bash'?'bash:'+commandFamily(tool,args).toLowerCase():tool;

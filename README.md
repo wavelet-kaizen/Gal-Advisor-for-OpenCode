@@ -87,7 +87,7 @@ EXHAUSTEDからモデル自身が解除するツールはありません。ユ�
 | 編集3回で進展なし | 自動。failureで示されたファイルに関係するedit/write/patchだけを集計。無関係な編集は修正回数に含めない |
 | CLI/host shellの取り違え | `unknown option` やPowerShell上のPOSIXコマンド不整合を分類し、ソース編集ではなくコマンド修正を促すNOTEを返す |
 | 同じ検索3回、結果不変 | 自動。glob/grepの完全一致ベース |
-| 調査停滞 / information-gain loop | goal登録後、同一subjectのread/grep/glob/bash観測を比較。行番号・数値・timing・ID揺らぎを正規化し、通常は直近6ツール内3 stale、verified completion後は直近4ツール内2 staleでAdvisor相談を要求。異なる対象ファイルは別subject |
+| 調査停滞 / information-gain loop | goal登録後、同一subjectのread/grep/glob/bash観測を比較。readは対象ファイル、globはpath+pattern、grepはpath+include+patternをsubject化し、行番号・数値・timing・ID揺らぎを正規化。通常は直近6ツール内3 stale、verified completion後は直近4ツール内2 staleでAdvisor相談を要求 |
 | テスト失敗数の減少・エラー種別/ファイルの変化 | カウンターをリセット。Node TAPと一般的なTests表記に対応 |
 | 否定済み仮説の再採用 | 同じ仮説キーのgal_reportで検知。証拠ID必須 |
 | 機械検証の手作業化・baseline矛盾 | 主エージェントのgal_reportで即停止 |
@@ -132,7 +132,7 @@ HEAD PASS / WORKTREE FAILの証拠登録、REFUTED仮説の再採用、TDDの8�
 停止中の迂回拒否、契約した1操作、重複相談、2回制限、problem episode分離、関連編集だけの修正カウント、
 NEXTの二段階実行・不一致解除・REPAIR、壊れた永続stateの修復、PowerShell/CLI誤用の分類、subagent分離、
 verified completion後の再編集停止・fresh evidenceによるgal_reopen・再verificationでのcheckpoint再設定、
-同一subjectのlow-novelty調査停滞・異なるsubjectの非誤検知・editによるwindow reset・completion後の厳格閾値を検証します。
+同一subjectのlow-novelty調査停滞・異なるsubjectの非誤検知・glob/grepの別queryが同じ空結果でも誤検知しないこと・editによるwindow reset・completion後の厳格閾値を検証します。
 実モデルによる診断品質の評価は別途必要です。
 
 `gal_status` のmetricsにはtool_calls、triggers、progress、gal_invocations、
