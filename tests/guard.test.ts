@@ -32,17 +32,23 @@ test('unchanged search three times triggers, different results do not',()=>{
   const h=new Guard();for(let i=0;i<3;i++)h.observe('grep',{pattern:'modal'},'result '+i);
   assert.equal(h.s.phase,'RUNNING');
 });
-test('ACCEPT requires evidence; only contracted operation is allowed once',()=>{
+test('ACCEPT requires evidence; mismatched NEXT cancels and correct NEXT executes once',()=>{
   const g=stuck();g.consult();g.advised(advice);
   assert.throws(()=>g.contract('ACCEPT','ok',[],next));
   g.contract('ACCEPT','HEAD passes',['e1'],next);
-  // NEXT phase: wrong tool gives actionable error with contracted move details
-  try{g.before('gal_recover',{decision:'ACCEPT'});assert.fail('should throw');}catch(e:any){
-    assert.match(e.message,/Execute the contracted observation/);
-    assert.match(e.message,new RegExp(next.tool));
-  }
-  // Correct contracted tool is allowed once
-  g.before(next.tool,next.args);assert.throws(()=>g.before(next.tool,next.args));
+  // A mismatched call cancels the bad contract and returns to CONTRACT with a precise delta.
+  assert.throws(
+    ()=>g.before('gal_recover',{decision:'ACCEPT'}),
+    /GAL GUARD NEXT MISMATCH: tool expected bash but received gal_recover/
+  );
+  assert.equal(g.s.phase,'CONTRACT');
+  assert.equal(g.s.move,undefined);
+
+  // Re-contract, then the intended operation may start exactly once.
+  g.contract('ACCEPT','retry contracted observation',['e1'],next);
+  g.before(next.tool,next.args);
+  assert.equal(g.s.phase,'NEXT_EXECUTING');
+  assert.throws(()=>g.before(next.tool,next.args),/GAL GUARD NEXT_EXECUTING/);
   g.observe(next.tool,next.args,'changed closing bracket',0);
   assert.equal(g.s.phase,'RUNNING');
 });

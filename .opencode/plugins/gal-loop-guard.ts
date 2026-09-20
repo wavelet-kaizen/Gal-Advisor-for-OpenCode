@@ -95,7 +95,9 @@ const GalLoopGuard: Plugin = async ({ directory, client }) => {
     event:async({event})=>{
       if(event.type!=='message.part.updated') return;
       const part=event.properties.part;
-      if(part.type!=='tool'||part.state.status!=='error'||part.state.error.startsWith('GAL ')) return;
+      if(part.type!=='tool') return;
+      const state=part.state;
+      if(state.status!=='error'||state.error.startsWith('GAL ')) return;
       if(part.tool.startsWith('gal_')) return;
       const callKey=part.sessionID+':'+part.callID;
       if(failedCalls.has(callKey)) return;
@@ -103,7 +105,7 @@ const GalLoopGuard: Plugin = async ({ directory, client }) => {
       if(await isAdvisor(part.sessionID)) return;
       await transaction(part.sessionID,g=>{
         if(part.tool==='task'&&g.s.phase==='CONSULTING') {g.exhaust('Advisor task failed; no automatic retry');return;}
-        g.observe(part.tool,part.state.input,part.state.error,1);
+        g.observe(part.tool,state.input,state.error,1);
       });
     },
   };
