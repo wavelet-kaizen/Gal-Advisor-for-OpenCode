@@ -332,14 +332,17 @@ test('goal gate allows discovery but blocks first edit and verification until ga
   assert.doesNotThrow(()=>g.before('bash',{command:'cd D:\\projects\\app; openspec list --json'}));
   assert.doesNotThrow(()=>g.before('bash',{command:'openspec status --change x --json'}));
   assert.doesNotThrow(()=>g.before('bash',{command:'openspec instructions apply --change x --json'}));
+  assert.doesNotThrow(()=>g.before('bash',{command:'openspec store list --json'}));
+  assert.doesNotThrow(()=>g.before('bash',{command:'cd D:\\projects\\app; openspec store list --json'}));
   assert.doesNotThrow(()=>g.before('bash',{command:'git status --short; git diff --stat; git log --oneline -3'}));
+  assert.throws(()=>g.before('bash',{command:'openspec store add team-context'}),/GAL GOAL REQUIRED/);
   assert.throws(
     ()=>g.before('edit',{filePath:'web/js/memory.js'}),
     /GAL GOAL REQUIRED: register the current task goal with gal_report\(goal=\.\.\.\) before edits or verification/
   );
   assert.throws(()=>g.before('bash',{command:'node scripts/memory_regression.js'}),/GAL GOAL REQUIRED/);
   assert.equal(g.s.phase,'RUNNING');
-  assert.equal(g.s.metrics.goal_gate_blocks,2);
+  assert.equal(g.s.metrics.goal_gate_blocks,3);
   g.report({goal:'Implement and verify only task 1.3'});
   assert.doesNotThrow(()=>g.before('edit',{filePath:'web/js/memory.js'}));
   assert.doesNotThrow(()=>g.before('bash',{command:'node scripts/memory_regression.js'}));
@@ -369,6 +372,7 @@ test('verified OpenSpec completion blocks post-success churn and ad-hoc inspecti
   assert.throws(()=>g.before('bash',{command:'node -e "console.log(1)"'}),/GAL COMPLETION GUARD/);
   assert.doesNotThrow(()=>g.before('read',{filePath:'web/js/memory.js'}));
   assert.doesNotThrow(()=>g.before('bash',{command:'git diff -- web/js/memory.js'}));
+  assert.doesNotThrow(()=>g.before('bash',{command:'openspec store list --json'}));
   assert.doesNotThrow(()=>g.before('bash',{command:'node scripts/memory_regression.js'}));
   assert.equal(g.s.metrics.post_success_blocks,2);
 });

@@ -50,7 +50,7 @@ RUNNING → REQUIRED → CONSULTING → CONTRACT → NEXT → NEXT_EXECUTING →
 契約したNEXT以外のツール呼び出しを拒否します。bashや別subagentによる迂回も拒否します。
 すでに実行中の操作を巻き戻す機能はありません。
 
-1. 人間が `gal_report` を指示する必要はありません。主エージェントはread/glob/grep、`openspec list/status/show/instructions`、read-only Git確認で作業内容を理解できますが、
+1. 人間が `gal_report` を指示する必要はありません。主エージェントはread/glob/grep、`openspec list/status/show/instructions`、`openspec store list`、read-only Git確認で作業内容を理解できますが、
    goal未登録のまま最初のedit/write/patchまたはその他のbash検証へ進むとGuardが `GAL GOAL REQUIRED` でその1操作を止めます。
    主エージェント自身が `gal_report(goal=...)` で現在タスクを短く登録すると、そのままRUNNINGで再開できます。
    `gal_status` は既定でcompact表示（phase/reason/契約状態/current evidence summary/metrics）だけを返します。
@@ -91,7 +91,7 @@ EXHAUSTEDからモデル自身が解除するツールはありません。ユ�
 | 否定済み仮説の再採用 | 同じ仮説キーのgal_reportで検知。証拠ID必須 |
 | 機械検証の手作業化・baseline矛盾 | 主エージェントのgal_reportで即停止 |
 | SOFTシグナル | gal_reportの異なる2種類、直近8ツール以内 |
-| Goal未登録の実作業 | read/glob/grep、OpenSpec/Gitのread-only discoveryは許可。最初のedit/write/patchまたはそれ以外のbashをGAL GOAL REQUIREDで停止し、gal_report(goal=...)を要求 |
+| Goal未登録の実作業 | read/glob/grep、OpenSpec/Gitのread-only discovery（openspec store listを含む）は許可。最初のedit/write/patchまたはそれ以外のbashをGAL GOAL REQUIREDで停止し、gal_report(goal=...)を要求 |
 | 成功後の再オープン | 認識済みverification PASS + OpenSpec task [x] でcompletion checkpoint。edit/write/patchとad-hoc bashを停止。新しいevidence + gal_reopenで訂正editを1回だけ許可し、その後verification必須。PASSで再ロック、FAILで自動解除 |
 | Advisorの観測回数 | プラグイン有効時はread/glob/grepを合計2回まで |
 

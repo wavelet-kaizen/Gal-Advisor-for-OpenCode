@@ -95,6 +95,7 @@ function goalFreeBash(args:Record<string,unknown>) {
   return segments.length>0&&segments.every(segment=>
     shellNavigation(segment)||
     /^openspec\s+(?:list|status|show|instructions)\b/i.test(segment)||
+    /^openspec\s+store\s+list\b/i.test(segment)||
     /^git\s+(?:status|diff|show|log|branch|rev-parse)\b/i.test(segment)
   );
 }

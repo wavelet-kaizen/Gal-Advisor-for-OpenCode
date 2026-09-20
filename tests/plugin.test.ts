@@ -158,6 +158,7 @@ test('plugin forces autonomous goal registration before first edit or verificati
     const tools=(hooks as any).tool;
     await hooks['tool.execute.before']!({sessionID:'goal',tool:'read',callID:'r1'},{args:{filePath:'web/js/memory.js'}});
     await hooks['tool.execute.before']!({sessionID:'goal',tool:'bash',callID:'b1'},{args:{command:'openspec instructions apply --change x --json'}});
+    await hooks['tool.execute.before']!({sessionID:'goal',tool:'bash',callID:'b-store'},{args:{command:'openspec store list --json'}});
     await assert.rejects(
       hooks['tool.execute.before']!({sessionID:'goal',tool:'edit',callID:'e1'},{args:{filePath:'web/js/memory.js'}}),
       /GAL GOAL REQUIRED/
