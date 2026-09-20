@@ -11,6 +11,7 @@ export type Move = { tool: string; args: Record<string, unknown> };
 export type FailureKind = 'verification'|'cli_usage'|'shell_mismatch'|'tooling';
 export type Phase = 'RUNNING'|'REQUIRED'|'CONSULTING'|'CONTRACT'|'NEXT'|'NEXT_EXECUTING'|'EXHAUSTED';
 type Evidence = { id: string; tick?: number; tool: string; args: Record<string, unknown>; output: string; signature: string; kind?: FailureKind };
+type InvestigationObservation = { tick: number; tool: string; subject: string; fingerprint: string; stale: boolean };
 const STATE_SCHEMA_VERSION=2;
 
 const RECOVERY_TOOLS=new Set(['read','glob','grep','bash']);
@@ -83,6 +84,30 @@ function editPaths(args:Record<string,unknown>) {
 function commandFamily(tool:string,args:Record<string,unknown>) {
   if(tool!=='bash') return tool;
   return String(args.command??'').trim().split(/\s+/).slice(0,2).join(' ');
+}
+function investigationSubject(tool:string,args:Record<string,unknown>,clean:string) {
+  const direct=tool==='read'?args.filePath:(tool==='grep'||tool==='glob')?args.path:undefined;
+  if(typeof direct==='string'&&direct.trim()) return normPath(direct).toLowerCase();
+  const location=clean.match(/(?:^|\s)((?:[A-Za-z]:[\\/]|\.{0,2}[\\/])?[A-Za-z0-9_@./\\-]+\.(?:[cm]?[jt]s|tsx|py|java|md|json))(?:[:(]\d+)?/m);
+  if(location) return normPath(location[1]).toLowerCase();
+  return tool==='bash'?'bash:'+commandFamily(tool,args).toLowerCase():tool;
+}
+function investigationFingerprint(clean:string) {
+  const normalized=clean
+    .replace(/\b0x[0-9a-f]+\b/gi,'<hex>')
+    .replace(/\b[0-9a-f]{7,64}\b/gi,'<id>')
+    .replace(/:\d+(?::\d+)?\b/g,':<n>')
+    .replace(/\b\d+(?:\.\d+)?\b/g,'<n>')
+    .replace(/\s+/g,' ')
+    .trim()
+    .toLowerCase()
+    .slice(0,2400);
+  return hash(normalized||'(empty)');
+}
+function investigationEligible(tool:string,args:Record<string,unknown>) {
+  if(!['read','grep','glob','bash'].includes(tool)) return false;
+  if(tool==='bash'&&verificationBash(args)) return false;
+  return true;
 }
 function shellSegments(args:Record<string,unknown>) {
   return String(args.command??'').trim().split(/\s*(?:;|&&)\s*/).map(x=>x.trim()).filter(Boolean);
@@ -167,13 +192,14 @@ export type State = {
   lastVerification?: {tick:number; revision:number; command:string; signature:string};
   completion?: {tick:number; revision:number; path:string; verificationTick:number; command:string};
   completionReopen?: {tick:number; evidence:string[]; editUsed:boolean};
+  investigation: InvestigationObservation[];
   metrics: Record<string,number>;
 };
 export const initial = (): State => ({
   schemaVersion:STATE_SCHEMA_VERSION,
   phase:'RUNNING',goal:'',problem:'',problemSignature:'',problemOperation:'',reason:'',
   tick:0,episodeStartTick:0,edits:0,failure:'',failureFile:'',failureKind:'',failures:0,
-  lastEdit:0,revision:0,relevantRevision:0,evidence:[],repeats:{},calls:{},hypotheses:{},signals:[],metrics:{},
+  lastEdit:0,revision:0,relevantRevision:0,evidence:[],repeats:{},calls:{},hypotheses:{},signals:[],investigation:[],metrics:{},
 });
 type StoredState = Partial<State> & {schemaVersion?:number};
 function migrateLegacyState(source:StoredState):State {
@@ -194,7 +220,7 @@ function normalizeState(s:State):State {
   const source=s as StoredState;
   if(source.schemaVersion!==STATE_SCHEMA_VERSION) return migrateLegacyState(source);
   const b=initial();
-  return {...b,...source,evidence:source.evidence??[],repeats:source.repeats??{},calls:source.calls??{},hypotheses:source.hypotheses??{},signals:source.signals??[],metrics:source.metrics??{}};
+  return {...b,...source,evidence:source.evidence??[],repeats:source.repeats??{},calls:source.calls??{},hypotheses:source.hypotheses??{},signals:source.signals??[],investigation:source.investigation??[],metrics:source.metrics??{}};
 }
 function compactEvidence(e:Evidence) {
   return {
@@ -247,6 +273,7 @@ export class Guard {
       completionReopen:this.s.completionReopen,
       completionMarker:this.s.completionMarker,
       lastVerification:this.s.lastVerification,
+      investigation:this.investigationSummary(),
       episodeStartTick:this.s.episodeStartTick,
       evidenceCount:evidence.length,
       evidence,
@@ -257,8 +284,32 @@ export class Guard {
     const pool=current?this.episodeEvidence():this.s.evidence;
     return ids.length>0&&ids.every(id=>pool.some(e=>e.id===id));
   }
+  private investigationSummary() {
+    const recent=this.s.investigation.slice(-6);
+    if(!recent.length) return undefined;
+    return {
+      stale:recent.filter(x=>x.stale).length,
+      recent:recent.map(x=>({tick:x.tick,tool:x.tool,subject:x.subject,stale:x.stale})),
+    };
+  }
+  private trackInvestigation(tool:string,args:Record<string,unknown>,clean:string) {
+    if(this.s.phase!=='RUNNING'||!this.s.goal||!investigationEligible(tool,args)) return;
+    const horizon=this.s.completion?4:6;
+    const subject=investigationSubject(tool,args,clean);
+    const fingerprint=investigationFingerprint(clean);
+    const recent=this.s.investigation.filter(x=>this.s.tick-x.tick<horizon);
+    const stale=recent.some(x=>x.subject===subject&&x.fingerprint===fingerprint);
+    this.s.investigation=[...recent,{tick:this.s.tick,tool,subject,fingerprint,stale}].slice(-8);
+    this.metric(stale?'investigation_stale_observations':'investigation_novel_observations');
+    const staleCount=this.s.investigation.filter(x=>this.s.tick-x.tick<horizon&&x.stale).length;
+    const threshold=this.s.completion?2:3;
+    if(staleCount>=threshold) {
+      this.metric('investigation_stall_triggers');
+      this.trigger('investigation_stall_no_new_evidence');
+    }
+  }
   private resetLoopCounters() {
-    this.s.repeats={};this.s.failures=0;this.s.edits=0;this.s.failedCount=undefined;this.s.lastEdit=this.s.relevantRevision;
+    this.s.repeats={};this.s.failures=0;this.s.edits=0;this.s.failedCount=undefined;this.s.lastEdit=this.s.relevantRevision;this.s.investigation=[];
   }
   private startProblem(signature:string,operation:string,file:string,kind:FailureKind) {
     this.s.problemSignature=signature;
@@ -296,7 +347,7 @@ export class Guard {
       type:'GAL DIAGNOSTIC PACKET',goal:this.s.goal||'(unreported)',problem:this.s.problem,reason:this.s.reason,
       failure:{kind:this.s.failureKind,file:this.s.failureFile||undefined},episodeStartTick:this.s.episodeStartTick,
       evidence,evidenceOmitted:Math.max(0,all.length-evidence.length),hypotheses:this.s.hypotheses,completion:this.s.completion,
-      question:'Return exactly one evidence-based observation as NEXT MOVE.'
+      investigation:this.investigationSummary(),question:'Return exactly one evidence-based observation as NEXT MOVE.'
     });
   }
   guardNotice() {
@@ -312,7 +363,7 @@ export class Guard {
     return JSON.stringify({
       type:'GAL GUARD STATE',phase:this.s.phase,reason:this.s.reason,
       failure:{kind:this.s.failureKind,file:this.s.failureFile||undefined},
-      evidence,advisorMoveError:this.s.advisorMoveError,nextAction
+      evidence,investigation:this.investigationSummary(),advisorMoveError:this.s.advisorMoveError,nextAction
     });
   }
   reopen(reason:string,evidence:string[]) {
@@ -427,6 +478,7 @@ export class Guard {
       const markerChange=completionMarkerChange(tool,args);
       const reopenEdit=!!(this.s.completion&&this.s.completionReopen&&!this.s.completionReopen.editUsed);
       this.addEvidence(tool,args,clean,signature);
+      this.s.investigation=[];
       this.s.revision++;
       const paths=editPaths(args);
       if(this.s.failureFile&&paths.some(p=>sameFile(p,this.s.failureFile))) {this.s.relevantRevision++;this.s.edits++;}
@@ -489,6 +541,7 @@ export class Guard {
       this.addEvidence(tool,args,clean,signature);
       if(tool==='bash'&&this.s.problem&&key===this.s.problemOperation) {this.closeProblem();this.metric('progress');}
       if(tool==='bash'&&verificationBash(args)) {
+        this.s.investigation=[];
         this.s.lastVerification={tick:this.s.tick,revision:this.s.revision,command:String(args.command??''),signature};
         this.metric('verification_passes');
         if(this.s.completionMarker) {
@@ -497,6 +550,8 @@ export class Guard {
         }
       }
     }
+
+    this.trackInvestigation(tool,args,clean);
 
     if(['grep','glob'].includes(tool)) {
       const search=hash({tool,args,signature});this.s.repeats[search]=(this.s.repeats[search]??0)+1;
