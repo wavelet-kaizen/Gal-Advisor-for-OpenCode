@@ -355,6 +355,67 @@ test('goal gate treats openspec validate as verification, not discovery',()=> {
   assert.doesNotThrow(()=>g.before('bash',{command:'openspec validate --changes'}));
 });
 
+test('investigation stall triggers on repeated low-novelty observations for one subject',()=> {
+  const g=new Guard();
+  g.report({goal:'Diagnose a warning without reopening implementation'});
+  for(let i=0;i<4;i++) {
+    const args={filePath:'web/js/memory.js'};
+    g.before('read',args);
+    g.observe('read',args,'line '+(230+i)+': queue state '+(9+i));
+  }
+  assert.equal(g.s.phase,'REQUIRED');
+  assert.equal(g.s.reason,'investigation_stall_no_new_evidence');
+  assert.equal(g.s.metrics.investigation_stale_observations,3);
+  assert.equal(g.s.metrics.investigation_stall_triggers,1);
+  assert.match(g.packet(),/investigation_stall_no_new_evidence/);
+  assert.match(g.packet(),/"stale":true/);
+});
+
+test('investigation novelty is scoped by subject and materially changed output',()=> {
+  const g=new Guard();
+  g.report({goal:'Inspect several related files'});
+  for(let i=0;i<6;i++) {
+    g.observe('read',{filePath:'src/file'+i+'.ts'},'line '+i+': same numeric shape '+i);
+  }
+  assert.equal(g.s.phase,'RUNNING','same-shaped output from different files is not a stall');
+  for(const text of ['alpha branch','beta branch','gamma branch','delta branch']) {
+    g.observe('read',{filePath:'src/focus.ts'},text);
+  }
+  assert.equal(g.s.phase,'RUNNING','materially different facts from one file remain novel');
+  assert.equal(g.s.metrics.investigation_stall_triggers,undefined);
+});
+
+test('an edit resets low-novelty investigation history',()=> {
+  const g=new Guard();
+  g.report({goal:'Investigate then fix one issue'});
+  for(let i=0;i<3;i++) g.observe('read',{filePath:'src/focus.ts'},'line '+i+': same value '+i);
+  assert.equal(g.s.phase,'RUNNING');
+  assert.equal(g.s.metrics.investigation_stale_observations,2);
+  g.observe('edit',{filePath:'src/focus.ts'},'ok');
+  for(let i=0;i<3;i++) g.observe('read',{filePath:'src/focus.ts'},'line '+(10+i)+': same value '+(10+i));
+  assert.equal(g.s.phase,'RUNNING','a substantive edit starts a fresh investigation window');
+});
+
+test('verified completion uses a stricter low-novelty investigation threshold',()=> {
+  const g=new Guard();
+  g.report({goal:'Implement and verify only OpenSpec task 1.2'});
+  g.observe('bash',{command:'node scripts/memory_regression.js'},'MEMORY: ALL PASS',0);
+  g.observe('edit',{
+    filePath:'openspec/changes/serialize-summary-before-voice/tasks.md',
+    oldString:'- [ ] 1.2 queue settle',
+    newString:'- [x] 1.2 queue settle'
+  },'ok');
+  assert.ok(g.s.completion);
+  for(let i=0;i<3;i++) {
+    const args={filePath:'web/js/memory.js'};
+    g.before('read',args);
+    g.observe('read',args,'line '+(300+i)+': indentation '+(8+i));
+  }
+  assert.equal(g.s.phase,'REQUIRED');
+  assert.equal(g.s.reason,'investigation_stall_no_new_evidence');
+  assert.equal(g.s.metrics.investigation_stale_observations,2);
+});
+
 test('verified OpenSpec completion blocks post-success churn and ad-hoc inspection',()=> {
   const g=new Guard();
   g.report({goal:'Implement and verify only OpenSpec task 1.2'});
