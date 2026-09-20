@@ -10,8 +10,9 @@ mechanical facts are manually re-reasoned, or work drifts from the original goal
 Two distinct soft signals within eight tool calls also require consultation.
 Passing tests, fewer failures, changed error class/file, and evidence-backed
 refutation count as progress. Merely rephrasing a command does not.
+Only edits related to the located failure file count as fix attempts. If output shows a CLI flag error or a host-shell mismatch (for example POSIX syntax under PowerShell), fix the command/environment first rather than editing source files.
 
-With the plugin: use gal_report to record the original goal and hypotheses with
+With the plugin: register the original goal with gal_report before verification when practical. Use gal_report to record hypotheses with
 SUPPORTED / REFUTED / UNTESTED plus evidence IDs from gal_status. Report visible
 manual_verification / contradicted_baseline signals immediately. Never inspect
 or report hidden chain of thought. Semantic detection is cooperative, not guaranteed.
@@ -23,7 +24,10 @@ evidence IDs. ACCEPT automatically uses the Advisor's NEXT MOVE — next_tool an
 next_args are optional (the stored recommendation is used). REJECT requires objective
 evidence, a different next_tool/next_args, and an explanation of what evidence
 invalidates the Advisor's suggestion. Execute the contracted call before any other
-operation. Do not silently resume the stalled approach.
+operation. The Guard enters NEXT_EXECUTING and only releases after its result is observed.
+If a mismatched NEXT is attempted, use the reported expected/received delta and submit a corrected contract; the bad NEXT is cancelled automatically.
+Use gal_recover decision=REPAIR only when the contracted tool visibly returned a schema/infrastructure error but no completion hook was observed, and choose a different valid observation.
+Do not silently resume the stalled approach.
 
 Without the plugin: maintain the same packet (goal/subgoal, failure, baseline,
 attempts, evidence, hypotheses), counters and contract in visible text.

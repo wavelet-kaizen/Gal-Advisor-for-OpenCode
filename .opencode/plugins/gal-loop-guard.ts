@@ -13,7 +13,7 @@ const GalLoopGuard: Plugin = async ({ directory, client }) => {
       const path=join(root,hash(id)+'.json');
       let g=guards.get(id);
       if(!g) {
-        try { g=new Guard(JSON.parse(await readFile(path,'utf8')) as State); }
+        try {g=new Guard(JSON.parse(await readFile(path,'utf8')) as State);}
         catch(e) {if((e as NodeJS.ErrnoException).code!=='ENOENT') throw e;g=new Guard();}
         guards.set(id,g);
       }
@@ -34,19 +34,20 @@ const GalLoopGuard: Plugin = async ({ directory, client }) => {
   return {
     'chat.message':async(input)=>{if(input.agent==='gal-advisor') advisorSessions.add(input.sessionID);},
     tool: {
-      gal_status: tool({description:'Read Gal state, evidence IDs, diagnosis and metrics.',args:{},async execute(_,ctx){return transaction(ctx.sessionID,g=>JSON.stringify(g.s));}}),
+      gal_status: tool({description:'Read Gal state, current-problem evidence IDs, diagnosis and metrics.',args:{},async execute(_,ctx){return transaction(ctx.sessionID,g=>JSON.stringify(g.s));}}),
       gal_report: tool({description:'Report goal, evidence-backed hypothesis or visible loop signal. Never report hidden reasoning.',args:{
         goal:tool.schema.string().optional(),hypothesis:tool.schema.string().optional(),
         status:tool.schema.enum(['SUPPORTED','REFUTED','UNTESTED']).optional(),
         evidence:tool.schema.array(tool.schema.string()).optional(),
         signal:tool.schema.enum(['manual_verification','contradicted_baseline','advisor_approach_reuse','speculation','narrative_debugging','scope_drift','semantic_loop','assumption_lock','blast_radius']).optional(),
       },async execute(args,ctx){return transaction(ctx.sessionID,g=>{g.report(args);return g.packet();});}}),
-      gal_recover: tool({description:'Commit GAL ACCEPT/REJECT with objective evidence IDs and exactly one next observation. ACCEPT uses the Advisor NEXT MOVE automatically. For REJECT: read requires {filePath:string}; glob {pattern:string,path?:string}; grep {pattern:string,path?:string,include?:string}; bash is limited to simple git diff/status/show/log.',args:{
-        decision:tool.schema.enum(['ACCEPT','REJECT']),reason:tool.schema.string(),evidence:tool.schema.array(tool.schema.string()),
+      gal_recover: tool({description:'Commit GAL ACCEPT/REJECT, or REPAIR a NEXT execution that returned without a completion event. ACCEPT uses Advisor NEXT. REJECT/REPAIR require a valid different observation. read requires {filePath:string}; glob {pattern:string,path?:string}; grep {pattern:string,path?:string,include?:string}; bash is limited to simple git diff/status/show/log.',args:{
+        decision:tool.schema.enum(['ACCEPT','REJECT','REPAIR']),reason:tool.schema.string(),evidence:tool.schema.array(tool.schema.string()),
         next_tool:tool.schema.enum(['read','glob','grep','bash']).optional(),next_args:tool.schema.record(tool.schema.string(),tool.schema.unknown()).optional(),
       },async execute(args,ctx){return transaction(ctx.sessionID,g=>{
         const move=args.next_tool&&args.next_args?{tool:args.next_tool,args:args.next_args}:{tool:'',args:{}};
-        g.contract(args.decision,args.reason,args.evidence,move);
+        if(args.decision==='REPAIR') g.repair(args.reason,args.evidence,move);
+        else g.contract(args.decision,args.reason,args.evidence,move);
         return 'GAL '+args.decision+'\nNEXT: '+JSON.stringify(g.s.move);
       });}}),
     },
@@ -62,27 +63,29 @@ const GalLoopGuard: Plugin = async ({ directory, client }) => {
       await transaction(input.sessionID,g=>{
         g.before(input.tool,output.args);
         if(input.tool==='task'&&output.args.subagent_type==='gal-advisor') {
-          g.consult();
-          delete output.args.task_id;
-          output.args.prompt=g.packet();
+          g.consult();delete output.args.task_id;output.args.prompt=g.packet();
         }
       });
     },
     'tool.execute.after':async(input,output)=>{
       if(await isAdvisor(input.sessionID)) return;
+      const exit=typeof output.metadata?.exit==='number'?output.metadata.exit:undefined;
+      if(exit!==undefined&&exit!==0) failedCalls.add(input.sessionID+':'+input.callID);
       await transaction(input.sessionID,g=>{
         if(input.tool==='task'&&input.args.subagent_type==='gal-advisor') {g.advised(output.output);return;}
         if(input.tool.startsWith('gal_')) return;
-        g.observe(input.tool,input.args,output.output,typeof output.metadata?.exit==='number'?output.metadata.exit:undefined);
+        const note=g.observe(input.tool,input.args,output.output,exit);
+        if(note) output.output+='\n'+note;
         if(g.s.phase==='REQUIRED') output.output+='\nGAL GUARD TRIGGERED. Stop retries. Invoke task subagent_type=gal-advisor.\n'+g.packet();
       });
     },
     'experimental.chat.system.transform':async(input,output)=>{
-      if(!input.sessionID || await isAdvisor(input.sessionID)) return;
+      if(!input.sessionID||await isAdvisor(input.sessionID)) return;
       await transaction(input.sessionID,g=>{
         if(g.s.phase!=='RUNNING') {
           let msg='GAL '+g.s.phase+'. No retries or edits.';
-          if(g.s.phase==='NEXT' && g.s.move) msg+='\nEXECUTE NOW — tool: '+g.s.move.tool+', args: '+JSON.stringify(g.s.move.args)+'\nDo not call gal_recover again. Call the tool above with exactly these args.';
+          if(g.s.phase==='NEXT'&&g.s.move) msg+='\nEXECUTE NOW — tool: '+g.s.move.tool+', args: '+JSON.stringify(g.s.move.args)+'\nPreserve the contracted values. Safe optional read/grep/glob args may be added.';
+          else if(g.s.phase==='NEXT_EXECUTING') msg+='\nThe contracted observation started but completion was not observed. If the tool already returned a schema/infrastructure error, use gal_recover decision=REPAIR with current evidence and a different valid observation.';
           else msg+=' '+g.packet()+'\n'+(g.s.advice??'');
           if(output.system.length>0) output.system[output.system.length-1]+='\n'+msg;
           else output.system.push(msg);
@@ -94,14 +97,13 @@ const GalLoopGuard: Plugin = async ({ directory, client }) => {
       const part=event.properties.part;
       if(part.type!=='tool'||part.state.status!=='error'||part.state.error.startsWith('GAL ')) return;
       if(part.tool.startsWith('gal_')) return;
-      const error=part.state.error;
       const callKey=part.sessionID+':'+part.callID;
       if(failedCalls.has(callKey)) return;
       failedCalls.add(callKey);
       if(await isAdvisor(part.sessionID)) return;
       await transaction(part.sessionID,g=>{
         if(part.tool==='task'&&g.s.phase==='CONSULTING') {g.exhaust('Advisor task failed; no automatic retry');return;}
-        g.observe(part.tool,part.state.input,error,1);
+        g.observe(part.tool,part.state.input,part.state.error,1);
       });
     },
   };

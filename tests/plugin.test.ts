@@ -71,3 +71,20 @@ test('system.transform pushes when system array is initially empty',async()=>{
     await rm(directory,{recursive:true,force:true});
   }
 });
+
+test('shell mismatch output gets an actionable host-shell note',async()=>{
+  const directory=await mkdtemp(join(tmpdir(),'gal-shell-note-'));
+  try {
+    const ctx={directory,client:{session:{messages:async()=>({data:[{info:{role:'user',agent:'build'}}]})}}} as unknown as PluginInput;
+    const hooks=await plugin(ctx);
+    const input={sessionID:'shell',tool:'bash',callID:'shell1',args:{command:'ls -la'}};
+    const output={title:'list',output:"Get-ChildItem: A parameter cannot be found that matches parameter name 'la'.",metadata:{exit:1}};
+    await hooks['tool.execute.after']!(input,output);
+    assert.match(output.output,/GAL NOTE: shell mismatch detected/);
+    assert.doesNotMatch(output.output,/GAL GUARD TRIGGERED/);
+  } finally {
+    assert.equal(dirname(resolve(directory)),resolve(tmpdir()));
+    assert.match(directory,/gal-shell-note-[^\\/]+$/);
+    await rm(directory,{recursive:true,force:true});
+  }
+});

@@ -131,3 +131,105 @@ test('different generic CLI usage errors do not collapse into one failure class'
   assert.equal(g.s.phase,'RUNNING');
   assert.equal(g.s.failures,0);
 });
+test('unrelated edits do not count as fixes for a located verification failure',()=> {
+  const g=new Guard();const f='src/a.ts:10\nTypeError: same bug';
+  g.observe('bash',{command:'node test one'},f,1);
+  g.observe('edit',{filePath:'src/b.ts'},'ok');
+  g.observe('bash',{command:'node test two'},f,1);
+  g.observe('edit',{filePath:'src/b.ts'},'ok');
+  g.observe('bash',{command:'node test three'},f,1);
+  assert.equal(g.s.phase,'RUNNING');
+  assert.equal(g.s.failures,0);
+  assert.equal(g.s.metrics.unrelated_edits,2);
+});
+test('two relevant fixes with the same verification failure trigger',()=> {
+  const g=new Guard();const f='src/a.ts:10\nTypeError: same bug';
+  g.observe('bash',{command:'node test one'},f,1);
+  g.observe('edit',{filePath:'src/a.ts'},'ok');
+  g.observe('bash',{command:'node test two'},f,1);
+  g.observe('edit',{filePath:'src/a.ts'},'ok');
+  g.observe('bash',{command:'node test three'},f,1);
+  assert.equal(g.s.phase,'REQUIRED');
+  assert.equal(g.s.reason,'same_failure_after_two_fixes');
+});
+test('three relevant edits before re-verification trigger without relying on global edit count',()=> {
+  const g=new Guard();const f='src/a.ts:10\nTypeError: same bug';
+  g.observe('bash',{command:'node test one'},f,1);
+  for(let i=0;i<3;i++) g.observe('edit',{filePath:'src/a.ts'},'ok');
+  g.observe('bash',{command:'node test two'},f,1);
+  assert.equal(g.s.phase,'REQUIRED');
+  assert.equal(g.s.reason,'three_relevant_edits_without_progress');
+});
+test('a distinct problem gets a fresh episode, evidence packet and consultation budget',()=> {
+  const g=stuck();const first=g.s.problem;
+  g.consult();g.advised(advice);g.contract('ACCEPT','inspect',['e1'],next);g.before(next.tool,next.args);g.observe(next.tool,next.args,'new diff',0);
+  const other={command:'node --check other.cjs'};const otherFailure="other.cjs:10\nTypeError: second bug";
+  g.observe('bash',other,otherFailure,1);g.observe('bash',other,otherFailure,1);
+  assert.equal(g.s.phase,'REQUIRED');assert.notEqual(g.s.problem,first);
+  assert.doesNotMatch(g.packet(),/Unexpected token/);
+  assert.match(g.packet(),/second bug/);
+  g.consult();assert.equal(g.s.phase,'CONSULTING');
+});
+test('NEXT mismatch reports the delta and cancels the bad contract instead of deadlocking',()=> {
+  const g=stuck();g.consult();g.advised(advice);
+  g.contract('REJECT','read source',['e1'],{tool:'read',args:{filePath:'a.ts'}});
+  assert.throws(()=>g.before('read',{filePath:'b.ts'}),/filePath expected .*a\.ts.*received .*b\.ts/);
+  assert.equal(g.s.phase,'CONTRACT');assert.equal(g.s.move,undefined);
+  g.contract('REJECT','read another source',['e1'],{tool:'read',args:{filePath:'c.ts'}});
+  assert.equal(g.s.phase,'NEXT');
+});
+test('NEXT is consumed only after its result is observed',()=> {
+  const g=stuck();g.consult();g.advised(advice);
+  g.contract('REJECT','read source',['e1'],{tool:'read',args:{filePath:'a.ts'}});
+  g.before('read',{filePath:'a.ts'});
+  assert.equal(g.s.phase,'NEXT_EXECUTING');assert.ok(g.s.move);
+  g.observe('read',{filePath:'a.ts'},'permission denied',1);
+  assert.equal(g.s.phase,'RUNNING');assert.equal(g.s.move,undefined);assert.equal(g.s.executing,undefined);
+});
+test('REPAIR escapes a NEXT execution whose completion event was lost',()=> {
+  const g=stuck();g.consult();g.advised(advice);
+  g.contract('REJECT','read source',['e1'],{tool:'read',args:{filePath:'a.ts'}});
+  g.before('read',{filePath:'a.ts'});
+  g.repair('tool returned without completion hook',['e1'],{tool:'read',args:{filePath:'b.ts'}});
+  assert.equal(g.s.phase,'NEXT');assert.deepEqual(g.s.move,{tool:'read',args:{filePath:'b.ts'}});
+});
+test('persisted malformed or in-flight NEXT state is repaired on reload',()=> {
+  const malformed=stuck();malformed.s.phase='NEXT';malformed.s.move={tool:'read',args:{filePath:{type:'string',value:'a.ts'}} as any};
+  const repaired=new Guard(JSON.parse(JSON.stringify(malformed.s)));
+  assert.equal(repaired.s.phase,'CONTRACT');assert.equal(repaired.s.move,undefined);assert.equal(repaired.s.metrics.state_repairs,1);
+  const inflight=stuck();inflight.s.phase='NEXT_EXECUTING';inflight.s.move={tool:'read',args:{filePath:'a.ts'}};inflight.s.executing={tool:'read',args:{filePath:'a.ts'}};
+  const resumed=new Guard(JSON.parse(JSON.stringify(inflight.s)));
+  assert.equal(resumed.s.phase,'NEXT');assert.equal(resumed.s.executing,undefined);
+});
+test('PowerShell and CLI usage failures are classified and steer away from source edits',()=> {
+  const g=new Guard();
+  const shell=g.observe('bash',{command:'ls -la'},"Get-ChildItem: A parameter cannot be found that matches parameter name 'la'.",1);
+  assert.match(shell??'',/shell mismatch/);assert.equal(g.s.failureKind,'shell_mismatch');
+  g.observe('edit',{filePath:'src/a.ts'},'ok');assert.equal(g.s.edits,0);
+  const cli=g.observe('bash',{command:'openspec validate --change x'},"error: unknown option '--change' (Did you mean --changes?)",1);
+  assert.match(cli??'',/CLI usage error/);assert.equal(g.s.failureKind,'cli_usage');
+});
+test('previous read with safe optional args is still the same stalled operation',()=> {
+  const g=new Guard();g.observe('read',{filePath:'a.ts',limit:300},'data');g.trigger('manual');g.consult();g.advised(advice);
+  assert.throws(()=>g.contract('REJECT','same read',['e1'],{tool:'read',args:{filePath:'a.ts'}}),/previous stalled operation/);
+});
+test('test failure counts stay in one problem episode while progress is recorded',()=> {
+  const g=new Guard();const args={command:'node --test'};
+  g.observe('bash',args,'# fail 8',1);const problem=g.s.problem;
+  g.observe('edit',{filePath:'src/a.ts'},'ok');
+  g.observe('bash',args,'# fail 3',1);
+  assert.equal(g.s.problem,problem);assert.equal(g.s.metrics.progress,1);
+  g.observe('bash',args,'# fail 1',1);
+  assert.equal(g.s.problem,problem);assert.equal(g.s.metrics.progress,2);
+});
+test('late goal registration does not re-key an active problem or reset its consultation budget',()=> {
+  const g=stuck();const problem=g.s.problem;
+  g.report({goal:'fix current failure'});
+  assert.equal(g.s.problem,problem);
+  g.consult();assert.equal(g.s.calls[problem].count,1);
+});
+test('simple recovery git inspection accepts Windows path separators',()=> {
+  const g=stuck();g.consult();g.advised(advice);
+  g.contract('REJECT','inspect windows path',['e1'],{tool:'bash',args:{command:'git diff HEAD -- tests\\image-translation.test.cjs'}});
+  assert.equal(g.s.phase,'NEXT');
+});
