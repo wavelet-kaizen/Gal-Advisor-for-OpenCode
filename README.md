@@ -67,7 +67,7 @@ RUNNING → REQUIRED → CONSULTING → CONTRACT → NEXT → NEXT_EXECUTING →
    NEXTのtool/argsが契約と違う場合、そのtoolは実行せず `phase_after=CONTRACT / move_cleared=true / REPAIR=false` を明示して戻します。
 6. 認識済みverificationがPASSし、OpenSpecの `tasks.md` で現在タスクが `[ ] → [x]` になるとverified completion checkpointを記録します。
    以後はread/grep/glob、read-only Git/OpenSpec discovery、認識済みverificationだけを許可し、edit/write/patchとad-hoc bashを停止します。
-   本物の欠陥を新たに見つけた場合はcheckpoint後のevidence IDを集め、`gal_reopen(reason,evidence)` で明示的に再開します。再verificationがPASSするとcheckpointを再設定します。認識済みverificationが失敗した場合は自動で解除します。
+   本物の欠陥を新たに見つけた場合はcheckpoint後のevidence IDを集め、`gal_reopen(reason,evidence)` で明示的に再開します。reopenで許可される訂正editは1回だけで、その後は認識済みverificationが必須です。PASSならcheckpointを再設定し、FAILならcheckpointを解除して通常デバッグへ戻します。
 
 同じ問題の相談は最大2回です。問題キーは現在のfailure種別・診断・ファイル・位置から作り、独立したfailureへ変わると新しいepisodeと相談予算になります。
 同じ問題で前回と観測証拠が同じなら再相談を拒否しEXHAUSTEDにします。
@@ -92,7 +92,7 @@ EXHAUSTEDからモデル自身が解除するツールはありません。ユ�
 | 機械検証の手作業化・baseline矛盾 | 主エージェントのgal_reportで即停止 |
 | SOFTシグナル | gal_reportの異なる2種類、直近8ツール以内 |
 | Goal未登録の実作業 | read/glob/grep、OpenSpec/Gitのread-only discoveryは許可。最初のedit/write/patchまたはそれ以外のbashをGAL GOAL REQUIREDで停止し、gal_report(goal=...)を要求 |
-| 成功後の再オープン | 認識済みverification PASS + OpenSpec task [x] でcompletion checkpoint。edit/write/patchとad-hoc bashを停止。新しいevidence + gal_reopenが必要。verification失敗時は自動解除 |
+| 成功後の再オープン | 認識済みverification PASS + OpenSpec task [x] でcompletion checkpoint。edit/write/patchとad-hoc bashを停止。新しいevidence + gal_reopenで訂正editを1回だけ許可し、その後verification必須。PASSで再ロック、FAILで自動解除 |
 | Advisorの観測回数 | プラグイン有効時はread/glob/grepを合計2回まで |
 
 自由な自然言語の意味判定、隠れた思考、同義検索、任意言語のテスト出力、
@@ -135,7 +135,7 @@ verified completion後の再編集停止・fresh evidenceによるgal_reopen・�
 
 `gal_status` のmetricsにはtool_calls、triggers、progress、gal_invocations、
 advisor_accept/reject/repair、advisor_exhausted、recovery_starts、recovery_observations、next_contract_mismatches、
-state_repairs、state_migrations、goal_gate_blocks、verification_passes、completion_markers、completion_checkpoints、post_success_blocks、completion_reopens、completion_invalidated、unrelated_edits、shell_mismatches、cli_usage_errorsを記録します。
+state_repairs、state_migrations、goal_gate_blocks、verification_passes、completion_markers、completion_checkpoints、post_success_blocks、completion_reopens、completion_reopen_edits、completion_invalidated、unrelated_edits、shell_mismatches、cli_usage_errorsを記録します。
 false_positive判定や解決率は自動推定しません。
 
 ## API根拠

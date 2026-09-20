@@ -388,15 +388,22 @@ test('post-success reopen requires fresh evidence, permits one fix, and re-arms 
   g.observe('bash',{command:'git diff -- web/js/memory.js'},'+ one-space indentation drift',0);
   const fresh=(g.status() as any).evidence.at(-1).id;
   g.reopen('git diff shows an unintended indentation-only change',[fresh]);
-  assert.equal(g.s.completion,undefined);
+  assert.ok(g.s.completion);
+  assert.equal(g.s.completionReopen?.editUsed,false);
   assert.doesNotThrow(()=>g.before('edit',{filePath:'web/js/memory.js'}));
-  g.observe('edit',{filePath:'web/js/memory.js'},'ok');
+  const editNote=g.observe('edit',{filePath:'web/js/memory.js'},'ok');
+  assert.match(editNote??'',/GAL COMPLETION REOPEN EDIT USED/);
+  assert.equal(g.s.completionReopen?.editUsed,true);
+  assert.throws(()=>g.before('edit',{filePath:'web/js/memory.js'}),/authorized corrective edit is already used/);
+  assert.throws(()=>g.before('bash',{command:'node -e "console.log(1)"'}),/GAL COMPLETION GUARD/);
   g.before('bash',{command:'node scripts/memory_regression.js'});
   const note=g.observe('bash',{command:'node scripts/memory_regression.js'},'MEMORY: ALL PASS',0);
   assert.match(note??'',/GAL COMPLETION CHECKPOINT/);
   assert.ok(g.s.completion);
+  assert.equal(g.s.completionReopen,undefined);
   assert.throws(()=>g.before('edit',{filePath:'web/js/memory.js'}),/GAL COMPLETION GUARD/);
   assert.equal(g.s.metrics.completion_reopens,1);
+  assert.equal(g.s.metrics.completion_reopen_edits,1);
   assert.ok((g.s.metrics.completion_checkpoints??0)>=2);
 });
 

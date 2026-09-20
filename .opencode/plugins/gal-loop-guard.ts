@@ -97,7 +97,12 @@ const GalLoopGuard: Plugin = async ({ directory, client }) => {
       if(!input.sessionID||await isAdvisor(input.sessionID)) return;
       await transaction(input.sessionID,g=>{
         if(g.s.phase==='RUNNING'&&g.s.completion) {
-          const msg='GAL COMPLETION CHECKPOINT. Verification passed and the OpenSpec task is marked complete. Do not edit or run ad-hoc bash. Observe with read/grep/glob/read-only git or rerun recognized verification. If new evidence proves a defect remains, use gal_reopen(reason,evidence).';
+          const reopen=g.s.completionReopen;
+          const msg=reopen
+            ?(reopen.editUsed
+              ?'GAL COMPLETION REOPEN. The one authorized corrective edit is used. Do not edit or run ad-hoc bash; run recognized verification now.'
+              :'GAL COMPLETION REOPEN. Fresh evidence authorized exactly one corrective edit. Ad-hoc bash remains blocked; after the edit run recognized verification.')
+            :'GAL COMPLETION CHECKPOINT. Verification passed and the OpenSpec task is marked complete. Do not edit or run ad-hoc bash. Observe with read/grep/glob/read-only git or rerun recognized verification. If new evidence proves a defect remains, use gal_reopen(reason,evidence).';
           if(output.system.length>0) output.system[output.system.length-1]+='\n'+msg;
           else output.system.push(msg);
         } else if(g.s.phase!=='RUNNING') {

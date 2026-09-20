@@ -165,6 +165,7 @@ export type State = {
   completionMarker?: {tick:number; revision:number; path:string};
   lastVerification?: {tick:number; revision:number; command:string; signature:string};
   completion?: {tick:number; revision:number; path:string; verificationTick:number; command:string};
+  completionReopen?: {tick:number; evidence:string[]; editUsed:boolean};
   metrics: Record<string,number>;
 };
 export const initial = (): State => ({
@@ -242,6 +243,7 @@ export class Guard {
       move:this.s.move,
       executing:this.s.executing,
       completion:this.s.completion,
+      completionReopen:this.s.completionReopen,
       completionMarker:this.s.completionMarker,
       lastVerification:this.s.lastVerification,
       episodeStartTick:this.s.episodeStartTick,
@@ -281,7 +283,7 @@ export class Guard {
     const marker=this.s.completionMarker,verification=this.s.lastVerification;
     if(!marker||!verification) return undefined;
     this.s.completion={tick:this.s.tick,revision:this.s.revision,path:marker.path,verificationTick:verification.tick,command:verification.command};
-    this.metric('completion_checkpoints');
+    this.s.completionReopen=undefined;this.metric('completion_checkpoints');
     return 'GAL COMPLETION CHECKPOINT: verification passed and '+marker.path+' marks the task complete. Further edits and ad-hoc bash are blocked. Observe with read/grep/glob or read-only git/OpenSpec; if a real defect remains, collect new evidence and call gal_reopen.';
   }
   trigger(reason:string) {if(this.s.phase==='RUNNING') {this.s.phase='REQUIRED';this.s.reason=reason;this.metric('triggers');}}
@@ -314,9 +316,10 @@ export class Guard {
   }
   reopen(reason:string,evidence:string[]) {
     if(this.s.phase!=='RUNNING'||!this.s.completion) throw Error('GAL REOPEN is available only after a verified completion checkpoint');
+    if(this.s.completionReopen) throw Error('GAL REOPEN is already active; use the authorized edit or run verification');
     const after=this.s.evidence.filter(e=>evidenceTick(e)>this.s.completion!.tick);
     if(!reason.trim()||evidence.length===0||!evidence.every(id=>after.some(e=>e.id===id))) throw Error('GAL REOPEN requires a reason and evidence produced after the completion checkpoint');
-    this.s.completion=undefined;this.metric('completion_reopens');
+    this.s.completionReopen={tick:this.s.tick,evidence:[...evidence],editUsed:false};this.metric('completion_reopens');
   }
   report(input:{goal?:string; hypothesis?:string; status?:string; evidence?:string[]; signal?:string}) {
     if(input.goal&&!this.s.goal) this.s.goal=input.goal;
@@ -390,8 +393,11 @@ export class Guard {
       throw Error('GAL GOAL REQUIRED: register the current task goal with gal_report(goal=...) before edits or verification. This tool did not run. Read/glob/grep and read-only OpenSpec/git discovery remain allowed.');
     }
     if(this.s.phase==='RUNNING'&&this.s.completion&&completionGateBlocks(tool,args)) {
+      const mutation=['edit','write','apply_patch','patch'].includes(tool);
+      if(mutation&&this.s.completionReopen&&!this.s.completionReopen.editUsed) return;
       this.metric('post_success_blocks');
-      throw Error('GAL COMPLETION GUARD: verification already passed and the OpenSpec task is marked complete. This tool did not run. Use read/grep/glob, read-only git/OpenSpec discovery, or a recognized verification command. If a real defect remains, collect evidence after this checkpoint and call gal_reopen(reason,evidence) before modifying files.');
+      const reopen=this.s.completionReopen?.editUsed?' The authorized corrective edit is already used; run recognized verification now.':'';
+      throw Error('GAL COMPLETION GUARD: verification already passed and the OpenSpec task is marked complete. This tool did not run.'+reopen+' Use read/grep/glob, read-only git/OpenSpec discovery, or a recognized verification command. If a real defect remains, collect evidence after this checkpoint and call gal_reopen(reason,evidence) before modifying files.');
     }
     if(['gal_accept','gal_reject'].includes(tool)&&this.s.phase==='CONTRACT') return;
     if(tool==='gal_repair'&&this.s.phase==='NEXT_EXECUTING') return;
@@ -418,16 +424,21 @@ export class Guard {
 
     if(['edit','write','apply_patch','patch'].includes(tool)) {
       const markerChange=completionMarkerChange(tool,args);
+      const reopenEdit=!!(this.s.completion&&this.s.completionReopen&&!this.s.completionReopen.editUsed);
       this.addEvidence(tool,args,clean,signature);
       this.s.revision++;
       const paths=editPaths(args);
       if(this.s.failureFile&&paths.some(p=>sameFile(p,this.s.failureFile))) {this.s.relevantRevision++;this.s.edits++;}
       else this.metric('unrelated_edits');
       if(markerChange?.kind==='reopen') {
-        this.s.completionMarker=undefined;this.s.completion=undefined;this.metric('completion_markers_reopened');
+        this.s.completionMarker=undefined;this.s.completion=undefined;this.s.completionReopen=undefined;this.metric('completion_markers_reopened');
       } else if(markerChange?.kind==='complete') {
         this.s.completionMarker={tick:this.s.tick,revision:this.s.revision,path:markerChange.path};this.metric('completion_markers');
         if(this.s.lastVerification&&this.s.lastVerification.revision===this.s.revision-1) return this.armCompletion();
+      }
+      if(reopenEdit&&this.s.completionReopen) {
+        this.s.completionReopen.editUsed=true;this.metric('completion_reopen_edits');
+        return 'GAL COMPLETION REOPEN EDIT USED: one evidence-backed corrective edit completed. Further edits and ad-hoc bash are blocked; run recognized verification now.';
       }
       return;
     }
@@ -445,7 +456,7 @@ export class Guard {
 
     if(failed) {
       if(tool==='bash'&&verificationBash(args)&&this.s.completion) {
-        this.s.completion=undefined;this.s.lastVerification=undefined;this.metric('completion_invalidated');
+        this.s.completion=undefined;this.s.completionReopen=undefined;this.s.lastVerification=undefined;this.metric('completion_invalidated');
       }
       const diagnostic=diagnosticLine(clean,error,failedCount);
       const kind=classifyFailure(clean,error,failedCount);
