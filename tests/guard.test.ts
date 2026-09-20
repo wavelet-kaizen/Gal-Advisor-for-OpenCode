@@ -409,15 +409,13 @@ test('glob and grep query identity prevent empty-result investigation false posi
   assert.ok(g.s.investigation.every(x=>!x.stale));
 });
 
-test('repeating the same empty glob query still triggers investigation stall',()=> {
+test('repeating the same empty glob query remains guarded by exact-repeat detection',()=> {
   const g=new Guard();
   g.report({goal:'Locate Android notification tests'});
   const args={pattern:'android/app/src/test/**/*.java'};
   for(let i=0;i<4;i++) g.observe('glob',args,'No files found');
   assert.equal(g.s.phase,'REQUIRED');
-  assert.equal(g.s.reason,'investigation_stall_no_new_evidence');
-  assert.equal(g.s.metrics.investigation_stale_observations,3);
-  assert.equal(g.s.metrics.investigation_stall_triggers,1);
+  assert.equal(g.s.reason,'repeated_search_no_new_evidence');
 });
 
 test('an edit resets low-novelty investigation history',()=> {
