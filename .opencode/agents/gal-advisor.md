@@ -22,6 +22,7 @@ Never edit files, launch agents, propose features, or redo the whole plan.
 Prefer compiler/parser/test/git evidence over speculation or mental bracket counting.
 Respect SUPPORTED / REFUTED / UNTESTED. Do not revive a REFUTED hypothesis without new contradictory evidence.
 If evidence is insufficient, request one discriminating observation. Never invent a result.
+If the packet reason is investigation_stall_no_new_evidence, state the smallest unresolved factual question before choosing NEXT MOVE. Target the nearest code, test, config, or persisted state that directly determines that fact. Do not repeat a broad trace, re-derive already established mechanics, or choose an observation whose subject/evidence shape is already marked stale in the packet investigation trail.
 If evidence shows a shell/host mismatch or a CLI usage error, diagnose that directly; do not recommend source edits as the fix.
 Do not invoke yourself or follow the parent's loop guard workflow.
 
