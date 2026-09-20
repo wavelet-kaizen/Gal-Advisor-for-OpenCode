@@ -87,6 +87,7 @@ EXHAUSTEDからモデル自身が解除するツールはありません。ユ�
 | 編集3回で進展なし | 自動。failureで示されたファイルに関係するedit/write/patchだけを集計。無関係な編集は修正回数に含めない |
 | CLI/host shellの取り違え | `unknown option` やPowerShell上のPOSIXコマンド不整合を分類し、ソース編集ではなくコマンド修正を促すNOTEを返す |
 | 同じ検索3回、結果不変 | 自動。glob/grepの完全一致ベース |
+| 調査停滞 / information-gain loop | goal登録後、同一subjectのread/grep/glob/bash観測を比較。行番号・数値・timing・ID揺らぎを正規化し、通常は直近6ツール内3 stale、verified completion後は直近4ツール内2 staleでAdvisor相談を要求。異なる対象ファイルは別subject |
 | テスト失敗数の減少・エラー種別/ファイルの変化 | カウンターをリセット。Node TAPと一般的なTests表記に対応 |
 | 否定済み仮説の再採用 | 同じ仮説キーのgal_reportで検知。証拠ID必須 |
 | 機械検証の手作業化・baseline矛盾 | 主エージェントのgal_reportで即停止 |
@@ -96,7 +97,7 @@ EXHAUSTEDからモデル自身が解除するツールはありません。ユ�
 | Advisorの観測回数 | プラグイン有効時はread/glob/grepを合計2回まで |
 
 自由な自然言語の意味判定、隠れた思考、同義検索、任意言語のテスト出力、
-bash内のファイル編集、変更の往復を完全に自動検出するものではありません。
+bash内のファイル編集、変更の往復を完全に自動検出するものではありません。investigation stallは意味理解ではなく、同一subjectの正規化output fingerprintに基づく保守的な近似です。
 特に「HEADも壊れていたのでは」という自由文だけを確実に捕捉するとは主張しません。
 仮説報告の協力部分と機械的な停止部分を分けてあります。
 
@@ -130,12 +131,13 @@ Qwenのテストは依頼文の事例から再構成したものです。未提�
 HEAD PASS / WORKTREE FAILの証拠登録、REFUTED仮説の再採用、TDDの8→3→1、
 停止中の迂回拒否、契約した1操作、重複相談、2回制限、problem episode分離、関連編集だけの修正カウント、
 NEXTの二段階実行・不一致解除・REPAIR、壊れた永続stateの修復、PowerShell/CLI誤用の分類、subagent分離、
-verified completion後の再編集停止・fresh evidenceによるgal_reopen・再verificationでのcheckpoint再設定を検証します。
+verified completion後の再編集停止・fresh evidenceによるgal_reopen・再verificationでのcheckpoint再設定、
+同一subjectのlow-novelty調査停滞・異なるsubjectの非誤検知・editによるwindow reset・completion後の厳格閾値を検証します。
 実モデルによる診断品質の評価は別途必要です。
 
 `gal_status` のmetricsにはtool_calls、triggers、progress、gal_invocations、
 advisor_accept/reject/repair、advisor_exhausted、recovery_starts、recovery_observations、next_contract_mismatches、
-state_repairs、state_migrations、goal_gate_blocks、verification_passes、completion_markers、completion_checkpoints、post_success_blocks、completion_reopens、completion_reopen_edits、completion_invalidated、unrelated_edits、shell_mismatches、cli_usage_errorsを記録します。
+state_repairs、state_migrations、goal_gate_blocks、verification_passes、completion_markers、completion_checkpoints、post_success_blocks、completion_reopens、completion_reopen_edits、completion_invalidated、investigation_novel_observations、investigation_stale_observations、investigation_stall_triggers、unrelated_edits、shell_mismatches、cli_usage_errorsを記録します。
 false_positive判定や解決率は自動推定しません。
 
 ## API根拠
