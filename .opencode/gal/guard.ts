@@ -84,6 +84,22 @@ function commandFamily(tool:string,args:Record<string,unknown>) {
   if(tool!=='bash') return tool;
   return String(args.command??'').trim().split(/\s+/).slice(0,2).join(' ');
 }
+function goalFreeBash(args:Record<string,unknown>) {
+  const command=String(args.command??'').trim();
+  if(!command) return false;
+  const segments=command.split(/\s*(?:;|&&)\s*/).map(x=>x.trim()).filter(Boolean);
+  return segments.length>0&&segments.every(segment=>
+    /^(?:cd|chdir|set-location)\b/i.test(segment)||
+    /^(?:pwd|get-location)\b/i.test(segment)||
+    /^openspec\s+(?:list|status|show|instructions)\b/i.test(segment)||
+    /^git\s+(?:status|diff|show|log|branch|rev-parse)\b/i.test(segment)
+  );
+}
+function requiresGoal(tool:string,args:Record<string,unknown>) {
+  if(['edit','write','apply_patch','patch'].includes(tool)) return true;
+  if(tool==='bash') return !goalFreeBash(args);
+  return false;
+}
 function classifyFailure(clean:string,error:string|undefined,failedCount:number|undefined):FailureKind {
   if(/(?:parameter (?:cannot be found|name).*['"]-?la['"]|not recognized as the name of a cmdlet|not recognized as an internal or external command|The term '.+' is not recognized|[A-Za-z]:\\dev\\null|(?:^|\s)head(?:\s|:).*not recognized)/im.test(clean)) return 'shell_mismatch';
   if(/\b(?:unknown|unrecognized) (?:option|argument)\b|\bDid you mean\b|^usage:/im.test(clean)) return 'cli_usage';
@@ -311,6 +327,10 @@ export class Guard {
     if(tool==='gal_status') return;
     if(this.s.phase==='EXHAUSTED') throw Error('GAL EXHAUSTED: stop autonomous debugging and report facts to user. '+this.s.reason);
     if(tool==='gal_report'&&this.s.phase==='RUNNING') return;
+    if(this.s.phase==='RUNNING'&&!this.s.goal&&requiresGoal(tool,args)) {
+      this.metric('goal_gate_blocks');
+      throw Error('GAL GOAL REQUIRED: register the current task goal with gal_report(goal=...) before edits or verification. This tool did not run. Read/glob/grep and read-only OpenSpec/git discovery remain allowed.');
+    }
     if(['gal_accept','gal_reject'].includes(tool)&&this.s.phase==='CONTRACT') return;
     if(tool==='gal_repair'&&this.s.phase==='NEXT_EXECUTING') return;
     if(tool==='task'&&args.subagent_type==='gal-advisor'&&['RUNNING','REQUIRED'].includes(this.s.phase)) return;

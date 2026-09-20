@@ -149,3 +149,28 @@ test('advisor prompt requires scoped grep when a relevant path is known',async()
   assert.match(prompt,/Use repo-wide grep only when the location is genuinely unknown/);
   assert.match(prompt,/"pattern":"notifyPressure\|pressureDue","path":"web\/js"/);
 });
+
+test('plugin forces autonomous goal registration before first edit or verification',async()=>{
+  const directory=await mkdtemp(join(tmpdir(),'gal-goal-gate-'));
+  try {
+    const ctx={directory,client:{session:{messages:async()=>({data:[{info:{role:'user',agent:'build'}}]})}}} as unknown as PluginInput;
+    const hooks=await plugin(ctx);
+    const tools=(hooks as any).tool;
+    await hooks['tool.execute.before']!({sessionID:'goal',tool:'read',callID:'r1'},{args:{filePath:'web/js/memory.js'}});
+    await hooks['tool.execute.before']!({sessionID:'goal',tool:'bash',callID:'b1'},{args:{command:'openspec instructions apply --change x --json'}});
+    await assert.rejects(
+      hooks['tool.execute.before']!({sessionID:'goal',tool:'edit',callID:'e1'},{args:{filePath:'web/js/memory.js'}}),
+      /GAL GOAL REQUIRED/
+    );
+    let status=JSON.parse(String(await tools.gal_status.execute({}, {sessionID:'goal'})));
+    assert.equal(status.phase,'RUNNING');
+    assert.equal(status.goal,'');
+    assert.equal(status.metrics.goal_gate_blocks,1);
+    const report=JSON.parse(String(await tools.gal_report.execute({goal:'Implement and verify only OpenSpec task 1.3'}, {sessionID:'goal'})));
+    assert.equal(report.goal,'Implement and verify only OpenSpec task 1.3');
+    await hooks['tool.execute.before']!({sessionID:'goal',tool:'edit',callID:'e2'},{args:{filePath:'web/js/memory.js'}});
+    await hooks['tool.execute.before']!({sessionID:'goal',tool:'bash',callID:'b2'},{args:{command:'node scripts/memory_regression.js'}});
+  } finally {
+    await rm(directory,{recursive:true,force:true});
+  }
+});

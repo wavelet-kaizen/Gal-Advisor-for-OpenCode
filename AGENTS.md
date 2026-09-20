@@ -12,7 +12,7 @@ Passing tests, fewer failures, changed error class/file, and evidence-backed
 refutation count as progress. Merely rephrasing a command does not.
 Only edits related to the located failure file count as fix attempts. If output shows a CLI flag error or a host-shell mismatch (for example POSIX syntax under PowerShell), fix the command/environment first rather than editing source files.
 
-With the plugin: register the original goal with gal_report before verification when practical. Use gal_report to record hypotheses with
+With the plugin: the human does not need to request goal registration explicitly. Read/glob/grep and read-only OpenSpec/git discovery may run first; before the first edit/write/patch or non-discovery bash verification, the Guard requires the main agent to register a concise current-task goal with gal_report(goal=...). Use gal_report to record hypotheses with
 SUPPORTED / REFUTED / UNTESTED plus evidence IDs from gal_status. Report visible
 manual_verification / contradicted_baseline signals immediately. Never inspect
 or report hidden chain of thought. Semantic detection is cooperative, not guaranteed.

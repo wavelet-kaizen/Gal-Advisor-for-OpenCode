@@ -324,3 +324,30 @@ test('NEXT mismatch explicitly says REPAIR is not the recovery path',()=> {
   assert.throws(()=>g.before('edit',{filePath:'a.ts'}),/REPAIR=false/);
   assert.equal(g.s.phase,'CONTRACT');
 });
+
+test('goal gate allows discovery but blocks first edit and verification until gal_report',()=> {
+  const g=new Guard();
+  assert.doesNotThrow(()=>g.before('read',{filePath:'web/js/memory.js'}));
+  assert.doesNotThrow(()=>g.before('grep',{pattern:'queueSettle',path:'web/js'}));
+  assert.doesNotThrow(()=>g.before('bash',{command:'cd D:\\projects\\app; openspec list --json'}));
+  assert.doesNotThrow(()=>g.before('bash',{command:'openspec status --change x --json'}));
+  assert.doesNotThrow(()=>g.before('bash',{command:'openspec instructions apply --change x --json'}));
+  assert.doesNotThrow(()=>g.before('bash',{command:'git status --short; git diff --stat; git log --oneline -3'}));
+  assert.throws(
+    ()=>g.before('edit',{filePath:'web/js/memory.js'}),
+    /GAL GOAL REQUIRED: register the current task goal with gal_report\(goal=\.\.\.\) before edits or verification/
+  );
+  assert.throws(()=>g.before('bash',{command:'node scripts/memory_regression.js'}),/GAL GOAL REQUIRED/);
+  assert.equal(g.s.phase,'RUNNING');
+  assert.equal(g.s.metrics.goal_gate_blocks,2);
+  g.report({goal:'Implement and verify only task 1.3'});
+  assert.doesNotThrow(()=>g.before('edit',{filePath:'web/js/memory.js'}));
+  assert.doesNotThrow(()=>g.before('bash',{command:'node scripts/memory_regression.js'}));
+});
+
+test('goal gate treats openspec validate as verification, not discovery',()=> {
+  const g=new Guard();
+  assert.throws(()=>g.before('bash',{command:'openspec validate --changes'}),/GAL GOAL REQUIRED/);
+  g.report({goal:'Validate current OpenSpec change'});
+  assert.doesNotThrow(()=>g.before('bash',{command:'openspec validate --changes'}));
+});

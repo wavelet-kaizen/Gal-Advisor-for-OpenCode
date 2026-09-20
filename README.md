@@ -50,7 +50,9 @@ RUNNING → REQUIRED → CONSULTING → CONTRACT → NEXT → NEXT_EXECUTING →
 契約したNEXT以外のツール呼び出しを拒否します。bashや別subagentによる迂回も拒否します。
 すでに実行中の操作を巻き戻す機能はありません。
 
-1. 主エージェントが `gal_report` で目的を登録。`gal_status` で現在episodeの証拠IDを確認できます。
+1. 人間が `gal_report` を指示する必要はありません。主エージェントはread/glob/grep、`openspec list/status/show/instructions`、read-only Git確認で作業内容を理解できますが、
+   goal未登録のまま最初のedit/write/patchまたはその他のbash検証へ進むとGuardが `GAL GOAL REQUIRED` でその1操作を止めます。
+   主エージェント自身が `gal_report(goal=...)` で現在タスクを短く登録すると、そのままRUNNINGで再開できます。
    `gal_status` は既定でcompact表示（phase/reason/契約状態/current evidence summary/metrics）だけを返します。
    永続state全体が明示的に必要な診断時だけ `gal_status` の `raw: true` を使用してください。
 2. Guardが停止したら `task` の `subagent_type: gal-advisor` を呼びます。
@@ -86,6 +88,7 @@ EXHAUSTEDからモデル自身が解除するツールはありません。ユ�
 | 否定済み仮説の再採用 | 同じ仮説キーのgal_reportで検知。証拠ID必須 |
 | 機械検証の手作業化・baseline矛盾 | 主エージェントのgal_reportで即停止 |
 | SOFTシグナル | gal_reportの異なる2種類、直近8ツール以内 |
+| Goal未登録の実作業 | read/glob/grep、OpenSpec/Gitのread-only discoveryは許可。最初のedit/write/patchまたはそれ以外のbashをGAL GOAL REQUIREDで停止し、gal_report(goal=...)を要求 |
 | Advisorの観測回数 | プラグイン有効時はread/glob/grepを合計2回まで |
 
 自由な自然言語の意味判定、隠れた思考、同義検索、任意言語のテスト出力、
@@ -127,7 +130,7 @@ NEXTの二段階実行・不一致解除・REPAIR、壊れた永続stateの修�
 
 `gal_status` のmetricsにはtool_calls、triggers、progress、gal_invocations、
 advisor_accept/reject/repair、advisor_exhausted、recovery_starts、recovery_observations、next_contract_mismatches、
-state_repairs、state_migrations、unrelated_edits、shell_mismatches、cli_usage_errorsを記録します。
+state_repairs、state_migrations、goal_gate_blocks、unrelated_edits、shell_mismatches、cli_usage_errorsを記録します。
 false_positive判定や解決率は自動推定しません。
 
 ## API根拠
