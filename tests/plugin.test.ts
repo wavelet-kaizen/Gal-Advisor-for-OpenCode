@@ -174,3 +174,34 @@ test('plugin forces autonomous goal registration before first edit or verificati
     await rm(directory,{recursive:true,force:true});
   }
 });
+
+test('completion checkpoint is injected into system and gal_reopen is exposed',async()=>{
+  const directory=await mkdtemp(join(tmpdir(),'gal-completion-'));
+  try {
+    const ctx={directory,client:{session:{messages:async()=>({data:[{info:{role:'user',agent:'build'}}]})}}} as unknown as PluginInput;
+    const hooks=await plugin(ctx);
+    const tools=(hooks as any).tool;
+    assert.ok(tools.gal_reopen);
+    assert.deepEqual(Object.keys(tools.gal_reopen.args).sort(),['evidence','reason']);
+    await tools.gal_report.execute({goal:'Implement task 1.2'}, {sessionID:'complete'});
+    await hooks['tool.execute.after']!({sessionID:'complete',tool:'bash',callID:'v1',args:{command:'node scripts/memory_regression.js'}},{title:'test',output:'MEMORY: ALL PASS',metadata:{exit:0}});
+    const editArgs={
+      filePath:'openspec/changes/serialize-summary-before-voice/tasks.md',
+      oldString:'- [ ] 1.2 queue settle',
+      newString:'- [x] 1.2 queue settle'
+    };
+    const editOut={title:'edit',output:'ok',metadata:{}};
+    await hooks['tool.execute.after']!({sessionID:'complete',tool:'edit',callID:'e1',args:editArgs},editOut);
+    assert.match(editOut.output,/GAL COMPLETION CHECKPOINT/);
+    const output={system:['base']};
+    await hooks['experimental.chat.system.transform']!({sessionID:'complete',model:{}as any},output);
+    assert.equal(output.system.length,1);
+    assert.match(output.system[0],/GAL COMPLETION CHECKPOINT/);
+    await assert.rejects(
+      hooks['tool.execute.before']!({sessionID:'complete',tool:'bash',callID:'x1'},{args:{command:'node -e "console.log(1)"'}}),
+      /GAL COMPLETION GUARD/
+    );
+  } finally {
+    await rm(directory,{recursive:true,force:true});
+  }
+});

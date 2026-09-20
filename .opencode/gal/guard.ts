@@ -84,21 +84,59 @@ function commandFamily(tool:string,args:Record<string,unknown>) {
   if(tool!=='bash') return tool;
   return String(args.command??'').trim().split(/\s+/).slice(0,2).join(' ');
 }
+function shellSegments(args:Record<string,unknown>) {
+  return String(args.command??'').trim().split(/\s*(?:;|&&)\s*/).map(x=>x.trim()).filter(Boolean);
+}
+function shellNavigation(segment:string) {
+  return /^(?:cd|chdir|set-location)\b/i.test(segment)||/^(?:pwd|get-location)\b/i.test(segment);
+}
 function goalFreeBash(args:Record<string,unknown>) {
-  const command=String(args.command??'').trim();
-  if(!command) return false;
-  const segments=command.split(/\s*(?:;|&&)\s*/).map(x=>x.trim()).filter(Boolean);
+  const segments=shellSegments(args);
   return segments.length>0&&segments.every(segment=>
-    /^(?:cd|chdir|set-location)\b/i.test(segment)||
-    /^(?:pwd|get-location)\b/i.test(segment)||
+    shellNavigation(segment)||
     /^openspec\s+(?:list|status|show|instructions)\b/i.test(segment)||
     /^git\s+(?:status|diff|show|log|branch|rev-parse)\b/i.test(segment)
   );
+}
+function verificationBash(args:Record<string,unknown>) {
+  const segments=shellSegments(args).filter(segment=>!shellNavigation(segment));
+  if(segments.length!==1) return false;
+  const command=segments[0];
+  return /^(?:npm(?:\.cmd)?\s+(?:test\b|run\s+(?:test|typecheck|lint|check|build)\b)|pnpm\s+(?:test\b|run\s+(?:test|typecheck|lint|check|build)\b)|yarn\s+(?:test\b|(?:test|typecheck|lint|check|build)\b)|bun\s+test\b|node(?:\.exe)?\s+--test\b|node(?:\.exe)?\s+\S*(?:test|spec|regression|check)\S*|pytest\b|python(?:\.exe)?\s+-m\s+pytest\b|cargo\s+test\b|go\s+test\b|dotnet\s+test\b|mvn\s+.*\btest\b|(?:gradle|gradlew(?:\.bat)?)\s+.*\btest\b|tsc\b|eslint\b|openspec\s+validate\b)/i.test(command);
 }
 function requiresGoal(tool:string,args:Record<string,unknown>) {
   if(['edit','write','apply_patch','patch'].includes(tool)) return true;
   if(tool==='bash') return !goalFreeBash(args);
   return false;
+}
+function completionGateBlocks(tool:string,args:Record<string,unknown>) {
+  if(['edit','write','apply_patch','patch'].includes(tool)) return true;
+  if(tool==='bash') return !goalFreeBash(args)&&!verificationBash(args);
+  if(tool==='task') return true;
+  return false;
+}
+function checkboxCount(text:string,checked:boolean) {
+  const re=checked?/^- \[[xX]\]/gm:/^- \[ \]/gm;
+  return text.match(re)?.length??0;
+}
+function completionMarkerChange(tool:string,args:Record<string,unknown>) {
+  if(!['edit','write','apply_patch','patch'].includes(tool)) return undefined;
+  const path=editPaths(args).find(p=>/(?:^|\/)openspec\/changes\/[^/]+\/tasks\.md$/i.test(normPath(p)));
+  if(!path) return undefined;
+  const oldText=String(args.oldString??args.old_string??'');
+  const newText=String(args.newString??args.new_string??'');
+  const patch=String(args.patchText??'');
+  if(oldText||newText) {
+    const oldOpen=checkboxCount(oldText,false),newOpen=checkboxCount(newText,false);
+    const oldDone=checkboxCount(oldText,true),newDone=checkboxCount(newText,true);
+    if(newDone>oldDone&&newOpen<oldOpen) return {kind:'complete' as const,path};
+    if(newDone<oldDone&&newOpen>oldOpen) return {kind:'reopen' as const,path};
+  }
+  if(patch) {
+    if(/^[-].*- \[ \]/m.test(patch)&&/^[+].*- \[[xX]\]/m.test(patch)) return {kind:'complete' as const,path};
+    if(/^[-].*- \[[xX]\]/m.test(patch)&&/^[+].*- \[ \]/m.test(patch)) return {kind:'reopen' as const,path};
+  }
+  return undefined;
 }
 function classifyFailure(clean:string,error:string|undefined,failedCount:number|undefined):FailureKind {
   if(/(?:parameter (?:cannot be found|name).*['"]-?la['"]|not recognized as the name of a cmdlet|not recognized as an internal or external command|The term '.+' is not recognized|[A-Za-z]:\\dev\\null|(?:^|\s)head(?:\s|:).*not recognized)/im.test(clean)) return 'shell_mismatch';
@@ -124,6 +162,9 @@ export type State = {
   hypotheses: Record<string,{status:string; evidence:string[]}>;
   signals: {name:string; tick:number}[]; advice?: string; recommended?: Move; advisorMoveError?: string;
   move?: Move; executing?: Move; previous?: string; previousMove?: Move;
+  completionMarker?: {tick:number; revision:number; path:string};
+  lastVerification?: {tick:number; revision:number; command:string; signature:string};
+  completion?: {tick:number; revision:number; path:string; verificationTick:number; command:string};
   metrics: Record<string,number>;
 };
 export const initial = (): State => ({
@@ -200,6 +241,9 @@ export class Guard {
       recommended:this.s.recommended,
       move:this.s.move,
       executing:this.s.executing,
+      completion:this.s.completion,
+      completionMarker:this.s.completionMarker,
+      lastVerification:this.s.lastVerification,
       episodeStartTick:this.s.episodeStartTick,
       evidenceCount:evidence.length,
       evidence,
@@ -233,6 +277,13 @@ export class Guard {
       this.s.evidence=this.s.evidence.slice(-24);
     }
   }
+  private armCompletion() {
+    const marker=this.s.completionMarker,verification=this.s.lastVerification;
+    if(!marker||!verification) return undefined;
+    this.s.completion={tick:this.s.tick,revision:this.s.revision,path:marker.path,verificationTick:verification.tick,command:verification.command};
+    this.metric('completion_checkpoints');
+    return 'GAL COMPLETION CHECKPOINT: verification passed and '+marker.path+' marks the task complete. Further edits and ad-hoc bash are blocked. Observe with read/grep/glob or read-only git/OpenSpec; if a real defect remains, collect new evidence and call gal_reopen.';
+  }
   trigger(reason:string) {if(this.s.phase==='RUNNING') {this.s.phase='REQUIRED';this.s.reason=reason;this.metric('triggers');}}
   exhaust(reason:string) {this.s.phase='EXHAUSTED';this.s.reason=reason;this.metric('advisor_exhausted');}
   packet() {
@@ -241,7 +292,7 @@ export class Guard {
     return JSON.stringify({
       type:'GAL DIAGNOSTIC PACKET',goal:this.s.goal||'(unreported)',problem:this.s.problem,reason:this.s.reason,
       failure:{kind:this.s.failureKind,file:this.s.failureFile||undefined},episodeStartTick:this.s.episodeStartTick,
-      evidence,evidenceOmitted:Math.max(0,all.length-evidence.length),hypotheses:this.s.hypotheses,
+      evidence,evidenceOmitted:Math.max(0,all.length-evidence.length),hypotheses:this.s.hypotheses,completion:this.s.completion,
       question:'Return exactly one evidence-based observation as NEXT MOVE.'
     });
   }
@@ -260,6 +311,12 @@ export class Guard {
       failure:{kind:this.s.failureKind,file:this.s.failureFile||undefined},
       evidence,advisorMoveError:this.s.advisorMoveError,nextAction
     });
+  }
+  reopen(reason:string,evidence:string[]) {
+    if(this.s.phase!=='RUNNING'||!this.s.completion) throw Error('GAL REOPEN is available only after a verified completion checkpoint');
+    const after=this.s.evidence.filter(e=>evidenceTick(e)>this.s.completion!.tick);
+    if(!reason.trim()||evidence.length===0||!evidence.every(id=>after.some(e=>e.id===id))) throw Error('GAL REOPEN requires a reason and evidence produced after the completion checkpoint');
+    this.s.completion=undefined;this.metric('completion_reopens');
   }
   report(input:{goal?:string; hypothesis?:string; status?:string; evidence?:string[]; signal?:string}) {
     if(input.goal&&!this.s.goal) this.s.goal=input.goal;
@@ -327,9 +384,14 @@ export class Guard {
     if(tool==='gal_status') return;
     if(this.s.phase==='EXHAUSTED') throw Error('GAL EXHAUSTED: stop autonomous debugging and report facts to user. '+this.s.reason);
     if(tool==='gal_report'&&this.s.phase==='RUNNING') return;
+    if(tool==='gal_reopen'&&this.s.phase==='RUNNING'&&this.s.completion) return;
     if(this.s.phase==='RUNNING'&&!this.s.goal&&requiresGoal(tool,args)) {
       this.metric('goal_gate_blocks');
       throw Error('GAL GOAL REQUIRED: register the current task goal with gal_report(goal=...) before edits or verification. This tool did not run. Read/glob/grep and read-only OpenSpec/git discovery remain allowed.');
+    }
+    if(this.s.phase==='RUNNING'&&this.s.completion&&completionGateBlocks(tool,args)) {
+      this.metric('post_success_blocks');
+      throw Error('GAL COMPLETION GUARD: verification already passed and the OpenSpec task is marked complete. This tool did not run. Use read/grep/glob, read-only git/OpenSpec discovery, or a recognized verification command. If a real defect remains, collect evidence after this checkpoint and call gal_reopen(reason,evidence) before modifying files.');
     }
     if(['gal_accept','gal_reject'].includes(tool)&&this.s.phase==='CONTRACT') return;
     if(tool==='gal_repair'&&this.s.phase==='NEXT_EXECUTING') return;
@@ -355,11 +417,18 @@ export class Guard {
     const signature=hash({tool,exit,output:clean.replace(/\b\d+(?:\.\d+)?\s*ms\b/g,'<time>')});
 
     if(['edit','write','apply_patch','patch'].includes(tool)) {
+      const markerChange=completionMarkerChange(tool,args);
       this.addEvidence(tool,args,clean,signature);
       this.s.revision++;
       const paths=editPaths(args);
       if(this.s.failureFile&&paths.some(p=>sameFile(p,this.s.failureFile))) {this.s.relevantRevision++;this.s.edits++;}
       else this.metric('unrelated_edits');
+      if(markerChange?.kind==='reopen') {
+        this.s.completionMarker=undefined;this.s.completion=undefined;this.metric('completion_markers_reopened');
+      } else if(markerChange?.kind==='complete') {
+        this.s.completionMarker={tick:this.s.tick,revision:this.s.revision,path:markerChange.path};this.metric('completion_markers');
+        if(this.s.lastVerification&&this.s.lastVerification.revision===this.s.revision-1) return this.armCompletion();
+      }
       return;
     }
 
@@ -375,6 +444,9 @@ export class Guard {
     let note:string|undefined;
 
     if(failed) {
+      if(tool==='bash'&&verificationBash(args)&&this.s.completion) {
+        this.s.completion=undefined;this.s.lastVerification=undefined;this.metric('completion_invalidated');
+      }
       const diagnostic=diagnosticLine(clean,error,failedCount);
       const kind=classifyFailure(clean,error,failedCount);
       const problemSignature=hash({kind,diagnostic,file,bucket});
@@ -404,6 +476,14 @@ export class Guard {
     } else {
       this.addEvidence(tool,args,clean,signature);
       if(tool==='bash'&&this.s.problem&&key===this.s.problemOperation) {this.closeProblem();this.metric('progress');}
+      if(tool==='bash'&&verificationBash(args)) {
+        this.s.lastVerification={tick:this.s.tick,revision:this.s.revision,command:String(args.command??''),signature};
+        this.metric('verification_passes');
+        if(this.s.completionMarker) {
+          const completionNote=this.armCompletion();
+          if(completionNote) note=note?note+'\n'+completionNote:completionNote;
+        }
+      }
     }
 
     if(['grep','glob'].includes(tool)) {

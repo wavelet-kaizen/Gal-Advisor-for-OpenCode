@@ -351,3 +351,77 @@ test('goal gate treats openspec validate as verification, not discovery',()=> {
   g.report({goal:'Validate current OpenSpec change'});
   assert.doesNotThrow(()=>g.before('bash',{command:'openspec validate --changes'}));
 });
+
+test('verified OpenSpec completion blocks post-success churn and ad-hoc inspection',()=> {
+  const g=new Guard();
+  g.report({goal:'Implement and verify only OpenSpec task 1.2'});
+  g.observe('edit',{filePath:'web/js/memory.js'},'ok');
+  const pass=g.observe('bash',{command:'node scripts/memory_regression.js'},'MEMORY: ALL PASS',0);
+  assert.equal(pass,undefined);
+  const done=g.observe('edit',{
+    filePath:'openspec/changes/serialize-summary-before-voice/tasks.md',
+    oldString:'- [ ] 1.2 queue settle',
+    newString:'- [x] 1.2 queue settle'
+  },'ok');
+  assert.match(done??'',/GAL COMPLETION CHECKPOINT/);
+  assert.ok(g.s.completion);
+  assert.throws(()=>g.before('edit',{filePath:'web/js/memory.js'}),/GAL COMPLETION GUARD/);
+  assert.throws(()=>g.before('bash',{command:'node -e "console.log(1)"'}),/GAL COMPLETION GUARD/);
+  assert.doesNotThrow(()=>g.before('read',{filePath:'web/js/memory.js'}));
+  assert.doesNotThrow(()=>g.before('bash',{command:'git diff -- web/js/memory.js'}));
+  assert.doesNotThrow(()=>g.before('bash',{command:'node scripts/memory_regression.js'}));
+  assert.equal(g.s.metrics.post_success_blocks,2);
+});
+
+test('post-success reopen requires fresh evidence, permits one fix, and re-arms after PASS',()=> {
+  const g=new Guard();
+  g.report({goal:'Implement and verify only OpenSpec task 1.2'});
+  g.observe('edit',{filePath:'web/js/memory.js'},'ok');
+  g.observe('bash',{command:'node scripts/memory_regression.js'},'MEMORY: ALL PASS',0);
+  g.observe('edit',{
+    filePath:'openspec/changes/serialize-summary-before-voice/tasks.md',
+    oldString:'- [ ] 1.2 queue settle',
+    newString:'- [x] 1.2 queue settle'
+  },'ok');
+  assert.throws(()=>g.reopen('indent looks odd',[]),/evidence produced after the completion checkpoint/);
+  g.before('bash',{command:'git diff -- web/js/memory.js'});
+  g.observe('bash',{command:'git diff -- web/js/memory.js'},'+ one-space indentation drift',0);
+  const fresh=(g.status() as any).evidence.at(-1).id;
+  g.reopen('git diff shows an unintended indentation-only change',[fresh]);
+  assert.equal(g.s.completion,undefined);
+  assert.doesNotThrow(()=>g.before('edit',{filePath:'web/js/memory.js'}));
+  g.observe('edit',{filePath:'web/js/memory.js'},'ok');
+  g.before('bash',{command:'node scripts/memory_regression.js'});
+  const note=g.observe('bash',{command:'node scripts/memory_regression.js'},'MEMORY: ALL PASS',0);
+  assert.match(note??'',/GAL COMPLETION CHECKPOINT/);
+  assert.ok(g.s.completion);
+  assert.throws(()=>g.before('edit',{filePath:'web/js/memory.js'}),/GAL COMPLETION GUARD/);
+  assert.equal(g.s.metrics.completion_reopens,1);
+  assert.ok((g.s.metrics.completion_checkpoints??0)>=2);
+});
+
+test('a failing recognized verification invalidates completion and permits repair',()=> {
+  const g=new Guard();
+  g.report({goal:'Implement and verify only OpenSpec task 1.2'});
+  g.observe('bash',{command:'node scripts/memory_regression.js'},'MEMORY: ALL PASS',0);
+  g.observe('edit',{
+    filePath:'openspec/changes/serialize-summary-before-voice/tasks.md',
+    oldString:'- [ ] 1.2 queue settle',
+    newString:'- [x] 1.2 queue settle'
+  },'ok');
+  assert.ok(g.s.completion);
+  assert.doesNotThrow(()=>g.before('bash',{command:'node scripts/memory_regression.js'}));
+  g.observe('bash',{command:'node scripts/memory_regression.js'},'AssertionError: queueSettle wrong',1);
+  assert.equal(g.s.completion,undefined);
+  assert.equal(g.s.metrics.completion_invalidated,1);
+  assert.doesNotThrow(()=>g.before('edit',{filePath:'web/js/memory.js'}));
+});
+
+test('PASS alone does not freeze ongoing work without an OpenSpec completion marker',()=> {
+  const g=new Guard();
+  g.report({goal:'Implement several planned steps'});
+  g.observe('edit',{filePath:'src/a.ts'},'ok');
+  g.observe('bash',{command:'npm test'},'all tests passed',0);
+  assert.equal(g.s.completion,undefined);
+  assert.doesNotThrow(()=>g.before('edit',{filePath:'src/b.ts'}));
+});

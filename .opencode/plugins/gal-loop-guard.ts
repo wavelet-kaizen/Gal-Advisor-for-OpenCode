@@ -41,6 +41,9 @@ const GalLoopGuard: Plugin = async ({ directory, client }) => {
         evidence:tool.schema.array(tool.schema.string()).optional(),
         signal:tool.schema.enum(['manual_verification','contradicted_baseline','advisor_approach_reuse','speculation','narrative_debugging','scope_drift','semantic_loop','assumption_lock','blast_radius']).optional(),
       },async execute(args,ctx){return transaction(ctx.sessionID,g=>{g.report(args);return JSON.stringify(g.status());});}}),
+      gal_reopen: tool({description:'Reopen a task after GAL recorded verified completion. Requires a concrete reason and evidence IDs produced after the completion checkpoint. Use only for a newly observed defect, not cosmetic speculation.',args:{
+        reason:tool.schema.string(),evidence:tool.schema.array(tool.schema.string()),
+      },async execute(args,ctx){return transaction(ctx.sessionID,g=>{g.reopen(args.reason,args.evidence);return 'GAL REOPEN\n'+JSON.stringify(g.status());});}}),
       gal_accept: tool({description:'Accept the Advisor NEXT MOVE. Supply only reason and current-episode evidence IDs; the stored Advisor NEXT is used automatically.',args:{
         reason:tool.schema.string(),evidence:tool.schema.array(tool.schema.string()),
       },async execute(args,ctx){return transaction(ctx.sessionID,g=>{
@@ -93,7 +96,11 @@ const GalLoopGuard: Plugin = async ({ directory, client }) => {
     'experimental.chat.system.transform':async(input,output)=>{
       if(!input.sessionID||await isAdvisor(input.sessionID)) return;
       await transaction(input.sessionID,g=>{
-        if(g.s.phase!=='RUNNING') {
+        if(g.s.phase==='RUNNING'&&g.s.completion) {
+          const msg='GAL COMPLETION CHECKPOINT. Verification passed and the OpenSpec task is marked complete. Do not edit or run ad-hoc bash. Observe with read/grep/glob/read-only git or rerun recognized verification. If new evidence proves a defect remains, use gal_reopen(reason,evidence).';
+          if(output.system.length>0) output.system[output.system.length-1]+='\n'+msg;
+          else output.system.push(msg);
+        } else if(g.s.phase!=='RUNNING') {
           let msg='GAL '+g.s.phase+'. No retries or edits.';
           if(g.s.phase==='NEXT'&&g.s.move) msg+='\nEXECUTE NOW — tool: '+g.s.move.tool+', args: '+JSON.stringify(g.s.move.args)+'\nPreserve the contracted values. Safe optional read/grep/glob args may be added.';
           else if(g.s.phase==='NEXT_EXECUTING') msg+='\nThe contracted observation started but completion was not observed. Do not use ACCEPT/REJECT here. Only if the correct NEXT visibly returned a tool/schema/infrastructure error without a completion event, call gal_repair with current evidence and a different valid observation.';
