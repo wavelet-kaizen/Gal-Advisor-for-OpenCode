@@ -34,7 +34,7 @@ const GalLoopGuard: Plugin = async ({ directory, client }) => {
   return {
     'chat.message':async(input)=>{if(input.agent==='gal-advisor') advisorSessions.add(input.sessionID);},
     tool: {
-      gal_status: tool({description:'Read Gal state, current-problem evidence IDs, diagnosis and metrics.',args:{},async execute(_,ctx){return transaction(ctx.sessionID,g=>JSON.stringify(g.s));}}),
+      gal_status: tool({description:'Read compact Gal status. Set raw=true only when the full persisted state is explicitly needed for diagnostics.',args:{raw:tool.schema.boolean().optional()},async execute(args,ctx){return transaction(ctx.sessionID,g=>JSON.stringify(g.status(args.raw===true)));}}),
       gal_report: tool({description:'Report goal, evidence-backed hypothesis or visible loop signal. Never report hidden reasoning.',args:{
         goal:tool.schema.string().optional(),hypothesis:tool.schema.string().optional(),
         status:tool.schema.enum(['SUPPORTED','REFUTED','UNTESTED']).optional(),

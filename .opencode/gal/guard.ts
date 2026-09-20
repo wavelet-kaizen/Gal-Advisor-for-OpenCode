@@ -11,6 +11,7 @@ export type Move = { tool: string; args: Record<string, unknown> };
 export type FailureKind = 'verification'|'cli_usage'|'shell_mismatch'|'tooling';
 export type Phase = 'RUNNING'|'REQUIRED'|'CONSULTING'|'CONTRACT'|'NEXT'|'NEXT_EXECUTING'|'EXHAUSTED';
 type Evidence = { id: string; tick?: number; tool: string; args: Record<string, unknown>; output: string; signature: string; kind?: FailureKind };
+const STATE_SCHEMA_VERSION=2;
 
 const RECOVERY_TOOLS=new Set(['read','glob','grep','bash']);
 const simpleGit=/^git (?:diff|status|show|log)(?: [a-zA-Z0-9_./\\:@{},+ -]+)?$/;
@@ -97,6 +98,7 @@ function diagnosticLine(clean:string,error:string|undefined,failedCount:number|u
 }
 
 export type State = {
+  schemaVersion: number;
   phase: Phase;
   goal: string; problem: string; problemSignature: string; problemOperation: string; reason: string;
   tick: number; episodeStartTick: number; edits: number;
@@ -109,13 +111,39 @@ export type State = {
   metrics: Record<string,number>;
 };
 export const initial = (): State => ({
+  schemaVersion:STATE_SCHEMA_VERSION,
   phase:'RUNNING',goal:'',problem:'',problemSignature:'',problemOperation:'',reason:'',
   tick:0,episodeStartTick:0,edits:0,failure:'',failureFile:'',failureKind:'',failures:0,
   lastEdit:0,revision:0,relevantRevision:0,evidence:[],repeats:{},calls:{},hypotheses:{},signals:[],metrics:{},
 });
+type StoredState = Partial<State> & {schemaVersion?:number};
+function migrateLegacyState(source:StoredState):State {
+  const evidence=Array.isArray(source.evidence)?source.evidence:[];
+  const maxEvidenceTick=evidence.reduce((max,e)=>Math.max(max,evidenceTick(e)),0);
+  const tick=Math.max(typeof source.tick==='number'?source.tick:0,maxEvidenceTick);
+  const metrics={...(source.metrics??{})};
+  metrics.state_migrations=(metrics.state_migrations??0)+1;
+  return {
+    ...initial(),
+    tick,
+    episodeStartTick:tick+1,
+    evidence:evidence.slice(-24),
+    metrics,
+  };
+}
 function normalizeState(s:State):State {
+  const source=s as StoredState;
+  if(source.schemaVersion!==STATE_SCHEMA_VERSION) return migrateLegacyState(source);
   const b=initial();
-  return {...b,...s,evidence:s.evidence??[],repeats:s.repeats??{},calls:s.calls??{},hypotheses:s.hypotheses??{},signals:s.signals??[],metrics:s.metrics??{}};
+  return {...b,...source,evidence:source.evidence??[],repeats:source.repeats??{},calls:source.calls??{},hypotheses:source.hypotheses??{},signals:source.signals??[],metrics:source.metrics??{}};
+}
+function compactEvidence(e:Evidence) {
+  return {
+    id:e.id,
+    tool:e.tool,
+    kind:e.kind,
+    summary:e.output.replace(/\s+/g,' ').trim().slice(0,240),
+  };
 }
 
 export class Guard {
@@ -142,6 +170,26 @@ export class Guard {
     }
   }
   private episodeEvidence() {return this.s.evidence.filter(e=>evidenceTick(e)>=this.s.episodeStartTick);}
+  status(raw=false) {
+    if(raw) return this.s;
+    const evidence=this.episodeEvidence().map(compactEvidence);
+    return {
+      schemaVersion:this.s.schemaVersion,
+      phase:this.s.phase,
+      goal:this.s.goal,
+      problem:this.s.problem,
+      reason:this.s.reason,
+      failure:{kind:this.s.failureKind,file:this.s.failureFile||undefined},
+      advisorMoveError:this.s.advisorMoveError,
+      recommended:this.s.recommended,
+      move:this.s.move,
+      executing:this.s.executing,
+      episodeStartTick:this.s.episodeStartTick,
+      evidenceCount:evidence.length,
+      evidence,
+      metrics:this.s.metrics,
+    };
+  }
   private refs(ids:string[],current=false) {
     const pool=current?this.episodeEvidence():this.s.evidence;
     return ids.length>0&&ids.every(id=>pool.some(e=>e.id===id));
@@ -185,7 +233,7 @@ export class Guard {
       const old=this.s.hypotheses[input.hypothesis];
       if(old?.status==='REFUTED'&&input.status!=='REFUTED') this.trigger('contradicted_hypothesis_reuse');
       else {
-        if(input.status!=='UNTESTED'&&!this.refs(input.evidence??[])) throw Error('Observed evidence IDs required');
+        if(input.status!=='UNTESTED'&&!this.refs(input.evidence??[],true)) throw Error('Current-problem evidence IDs required');
         this.s.hypotheses[input.hypothesis]={status:input.status??'UNTESTED',evidence:input.evidence??[]};
       }
     }

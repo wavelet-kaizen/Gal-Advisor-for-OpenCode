@@ -88,3 +88,24 @@ test('shell mismatch output gets an actionable host-shell note',async()=>{
     await rm(directory,{recursive:true,force:true});
   }
 });
+
+test('gal_status is compact by default and raw only on explicit request',async()=>{
+  const directory=await mkdtemp(join(tmpdir(),'gal-status-'));
+  try {
+    const ctx={directory,client:{session:{messages:async()=>({data:[{info:{role:'user',agent:'build'}}]})}}} as unknown as PluginInput;
+    const hooks=await plugin(ctx);
+    await hooks['tool.execute.after']!({sessionID:'status',tool:'read',callID:'status1',args:{filePath:'a.ts'}},{title:'read',output:'x'.repeat(3000),metadata:{}});
+    const tools=(hooks as any).tool;
+    const compact=JSON.parse(String(await tools.gal_status.execute({}, {sessionID:'status'})));
+    const raw=JSON.parse(String(await tools.gal_status.execute({raw:true}, {sessionID:'status'})));
+    assert.equal(compact.evidenceCount,1);
+    assert.equal(compact.evidence[0].summary.length,240);
+    assert.equal(compact.evidence[0].output,undefined);
+    assert.equal(raw.evidence[0].output.length,3000);
+    assert.ok(JSON.stringify(compact).length<JSON.stringify(raw).length/4);
+  } finally {
+    assert.equal(dirname(resolve(directory)),resolve(tmpdir()));
+    assert.match(directory,/gal-status-[^\\/]+$/);
+    await rm(directory,{recursive:true,force:true});
+  }
+});

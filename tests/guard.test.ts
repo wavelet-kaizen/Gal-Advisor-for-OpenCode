@@ -239,3 +239,52 @@ test('simple recovery git inspection accepts Windows path separators',()=> {
   g.contract('REJECT','inspect windows path',['e1'],{tool:'bash',args:{command:'git diff HEAD -- tests\\image-translation.test.cjs'}});
   assert.equal(g.s.phase,'NEXT');
 });
+test('legacy persisted state migrates to a clean RUNNING episode without losing raw history',()=> {
+  const source=stuck();
+  source.consult();source.advised(advice);
+  const legacy=JSON.parse(JSON.stringify(source.s)) as any;
+  delete legacy.schemaVersion;
+  legacy.phase='CONTRACT';
+  legacy.reason='same_failure_after_two_fixes';
+  legacy.recommended=next;
+  legacy.move={tool:'read',args:{filePath:{type:'string',value:'a.ts'}}};
+  legacy.calls={stale:{count:2,evidence:'old'}};
+  const oldEvidenceCount=legacy.evidence.length;
+  const migrated=new Guard(legacy);
+  const status=migrated.status() as any;
+  assert.equal(migrated.s.schemaVersion,2);
+  assert.equal(migrated.s.phase,'RUNNING');
+  assert.equal(migrated.s.goal,'');
+  assert.equal(migrated.s.problem,'');
+  assert.equal(migrated.s.reason,'');
+  assert.equal(migrated.s.move,undefined);
+  assert.equal(migrated.s.recommended,undefined);
+  assert.deepEqual(migrated.s.calls,{});
+  assert.equal(migrated.s.evidence.length,oldEvidenceCount,'raw history remains available for explicit diagnostics');
+  assert.equal(status.evidenceCount,0,'legacy history must not become current evidence');
+  assert.ok(migrated.s.episodeStartTick>migrated.s.tick);
+  assert.equal(migrated.s.metrics.state_migrations,1);
+});
+test('compact status summarizes current evidence while raw status retains full output',()=> {
+  const g=new Guard();
+  g.observe('read',{filePath:'a.ts'},'x'.repeat(3000));
+  const compact=g.status() as any;
+  const raw=g.status(true) as any;
+  assert.equal(compact.phase,'RUNNING');
+  assert.equal(compact.evidenceCount,1);
+  assert.equal(compact.evidence[0].id,'e1');
+  assert.equal(compact.evidence[0].summary.length,240);
+  assert.equal('output' in compact.evidence[0],false);
+  assert.equal(raw.evidence[0].output.length,3000);
+  assert.ok(JSON.stringify(compact).length<JSON.stringify(raw).length/4);
+});
+test('legacy evidence cannot be reused as current-problem hypothesis evidence after migration',()=> {
+  const source=stuck();
+  const legacy=JSON.parse(JSON.stringify(source.s)) as any;
+  delete legacy.schemaVersion;
+  const migrated=new Guard(legacy);
+  assert.throws(
+    ()=>migrated.report({hypothesis:'reuse old evidence',status:'SUPPORTED',evidence:['e1']}),
+    /Current-problem evidence IDs required/
+  );
+});

@@ -50,7 +50,9 @@ RUNNING → REQUIRED → CONSULTING → CONTRACT → NEXT → NEXT_EXECUTING →
 契約したNEXT以外のツール呼び出しを拒否します。bashや別subagentによる迂回も拒否します。
 すでに実行中の操作を巻き戻す機能はありません。
 
-1. 主エージェントが `gal_report` で目的を登録。`gal_status` で証拠IDを確認できます。
+1. 主エージェントが `gal_report` で目的を登録。`gal_status` で現在episodeの証拠IDを確認できます。
+   `gal_status` は既定でcompact表示（phase/reason/契約状態/current evidence summary/metrics）だけを返します。
+   永続state全体が明示的に必要な診断時だけ `gal_status` の `raw: true` を使用してください。
 2. Guardが停止したら `task` の `subagent_type: gal-advisor` を呼びます。
    プラグインはプロンプトを診断パケットに置換し、`task_id` を取り除いてfresh contextを確保します。
 3. Advisorは6セクション、NEXT MOVEには `{"tool":"...","args":{...}}` を1個返します。
@@ -63,6 +65,9 @@ RUNNING → REQUIRED → CONSULTING → CONTRACT → NEXT → NEXT_EXECUTING →
 同じ問題の相談は最大2回です。問題キーは現在のfailure種別・診断・ファイル・位置から作り、独立したfailureへ変わると新しいepisodeと相談予算になります。
 同じ問題で前回と観測証拠が同じなら再相談を拒否しEXHAUSTEDにします。
 再読み込み・コンパクションで予算を忘れないよう、プロジェクトの `.gal-state/` にセッション別状態を保存します。
+stateにはschema versionを持たせます。versionなしの旧stateを読み込んだ場合は一度だけ安全migrationを行い、
+phase/problem/契約/相談予算/loop counterを新規セッション相当にリセットします。旧evidenceはraw履歴として最大24件保持しますが、
+`episodeStartTick` を履歴の次へ進めるためcurrent evidenceや新しい契約の根拠には使用されません。
 EXHAUSTEDからモデル自身が解除するツールはありません。ユーザーへ事実と判断待ち事項を報告させます。
 ユーザーが問題を整理して新しいセッションを開始すると新しい予算になります。
 
@@ -118,7 +123,7 @@ NEXTの二段階実行・不一致解除・REPAIR、壊れた永続stateの修�
 
 `gal_status` のmetricsにはtool_calls、triggers、progress、gal_invocations、
 advisor_accept/reject/repair、advisor_exhausted、recovery_starts、recovery_observations、next_contract_mismatches、
-state_repairs、unrelated_edits、shell_mismatches、cli_usage_errorsを記録します。
+state_repairs、state_migrations、unrelated_edits、shell_mismatches、cli_usage_errorsを記録します.
 false_positive判定や解決率は自動推定しません。
 
 ## API根拠
