@@ -1,136 +1,158 @@
-import type { Plugin } from '@opencode-ai/plugin';
+import { Plugin } from '@opencode/plugin';
+import type { Plugin as V1Plugin, ToolContext } from '@opencode-ai/plugin';
 import { tool } from '@opencode-ai/plugin';
-import { Guard, hash, type State } from '../gal/guard.ts';
-import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
-import { join } from 'node:path';
+import type { Result } from '@opencode/plugin/promise/tool';
+import { canonicalMove, createGuardHooks } from '../gal/plugin.ts';
+import { GenerationMonitor } from '../gal/generation.ts';
 
-const GalLoopGuard: Plugin = async ({ directory, client }) => {
-  const root=join(directory,'.gal-state');
-  const guards=new Map<string,Guard>();
-  let queue:Promise<unknown>=Promise.resolve();
-  const transaction=<T>(id:string, action:(g:Guard)=>T|Promise<T>):Promise<T> => {
-    const run=queue.then(async()=>{
-      const path=join(root,hash(id)+'.json');
-      let g=guards.get(id);
-      if(!g) {
-        try {g=new Guard(JSON.parse(await readFile(path,'utf8')) as State);}
-        catch(e) {if((e as NodeJS.ErrnoException).code!=='ENOENT') throw e;g=new Guard();}
-        guards.set(id,g);
+const server:V1Plugin=({directory,client})=>createGuardHooks(directory,async(id)=>{
+  const result=await client.session.messages({path:{id},query:{limit:20}});
+  if(result.error) throw Error('Cannot identify session agent');
+  return result.data?.some(m=>m.info.role==='user'&&m.info.agent==='gal-advisor')??false;
+});
+
+function record(input:unknown):Record<string,unknown> {
+  if(!input||typeof input!=='object'||Array.isArray(input)) throw Error('GAL tool input must be an object');
+  return input as Record<string,unknown>;
+}
+
+type SessionID=Parameters<Plugin.Context['session']['get']>[0]['sessionID'];
+
+function text(result:Result):string {
+  if(typeof result.content==='string') return result.content;
+  if(result.content) return result.content.filter(p=>p.type==='text').map(p=>p.text).join('\n');
+  return typeof result.output==='string'?result.output:JSON.stringify(result.output)??'';
+}
+
+export default {
+  ...Plugin.define({
+    id:'gal-loop-guard',
+    async setup(ctx) {
+      const permission=ctx.permission as typeof ctx.permission & {assert?:(input:{sessionID:SessionID;action:string;resources:string[];save:string[]})=>Promise<void>};
+      const authorize=typeof permission?.assert==='function'?async(sessionID:string,path:string,external:boolean)=>{
+        if(external) await permission.assert!({sessionID:sessionID as SessionID,action:'external_directory',resources:[path],save:[]});
+        await permission.assert!({sessionID:sessionID as SessionID,action:'read',resources:[path],save:[]});
+      }:undefined;
+      const hooks=await createGuardHooks(ctx.location.directory,async(id)=>
+        (await ctx.session.get({sessionID:id as SessionID})).agent==='gal-advisor',true,authorize);
+      const monitor=new GenerationMonitor(hooks.settings.generation,(sessionID,message)=>{
+        // Emit a public notification, without enqueueing another model request.
+        void ctx.session.synthetic({sessionID:sessionID as SessionID,text:message,resume:false}).catch(()=>{});
+      });
+      const controller=new AbortController();let timer:ReturnType<typeof setInterval>|undefined;
+      let events:Promise<void>|undefined;
+      if(hooks.settings.generation.mode==='notify') {
+        if(typeof ctx.event?.subscribe!=='function') throw Error('GAL generation notifications require the public event subscription API');
+        let serial=0;
+        await ctx.session.hook('model.request',event=>monitor.start(event.sessionID,String(++serial),event.kind,event.agent==='gal-advisor'));
+        timer=setInterval(()=>monitor.poll(),1000);timer.unref?.();
+        hooks.monitorState.active=true;
+        events=(async()=>{
+          for await(const event of ctx.event.subscribe({signal:controller.signal})) {
+            if(event.type==='session.status') {
+              const data=event.data as {sessionID:string;status:{type:string}};
+              if(data.status.type==='idle') monitor.end(data.sessionID);
+            }
+          }
+        })().catch(error=>{if(!controller.signal.aborted){monitor.clear();if(timer) clearInterval(timer);hooks.monitorState.active=false;hooks.monitorState.error='Public lifecycle event stream unavailable';throw error;}});
+        // Consume failures; generation capability is only advisory and must not crash the host.
+        void events.catch(()=>{});
       }
-      try {return await action(g);}
-      finally {await mkdir(root,{recursive:true});await writeFile(path+'.tmp',JSON.stringify(g.s));await rename(path+'.tmp',path);}
-    });
-    queue=run.catch(()=>{});return run;
-  };
-  const advisorSessions=new Set<string>();
-  const failedCalls=new Set<string>();
-  async function isAdvisor(id:string) {
-    if(advisorSessions.has(id)) return true;
-    const result=await client.session.messages({path:{id},query:{limit:20}});
-    if(result.error) throw Error('Cannot identify session agent');
-    if(result.data?.some(m=>m.info.role==='user'&&m.info.agent==='gal-advisor')) {advisorSessions.add(id);return true;}
-    return false;
-  }
-  return {
-    'chat.message':async(input)=>{if(input.agent==='gal-advisor') advisorSessions.add(input.sessionID);},
-    tool: {
-      gal_status: tool({description:'Read compact Gal status. Set raw=true only when the full persisted state is explicitly needed for diagnostics.',args:{raw:tool.schema.boolean().optional()},async execute(args,ctx){return transaction(ctx.sessionID,g=>JSON.stringify(g.status(args.raw===true)));}}),
-      gal_report: tool({description:'Report goal, evidence-backed hypothesis or visible loop signal. Never report hidden reasoning.',args:{
-        goal:tool.schema.string().optional(),hypothesis:tool.schema.string().optional(),
-        status:tool.schema.enum(['SUPPORTED','REFUTED','UNTESTED']).optional(),
-        evidence:tool.schema.array(tool.schema.string()).optional(),
-        signal:tool.schema.enum(['manual_verification','contradicted_baseline','advisor_approach_reuse','speculation','narrative_debugging','scope_drift','semantic_loop','assumption_lock','blast_radius']).optional(),
-      },async execute(args,ctx){return transaction(ctx.sessionID,g=>{g.report(args);return JSON.stringify(g.status());});}}),
-      gal_reopen: tool({description:'Reopen a task after GAL recorded verified completion. Requires a concrete reason and evidence IDs produced after the completion checkpoint. Use only for a newly observed defect, not cosmetic speculation.',args:{
-        reason:tool.schema.string(),evidence:tool.schema.array(tool.schema.string()),
-      },async execute(args,ctx){return transaction(ctx.sessionID,g=>{g.reopen(args.reason,args.evidence);return 'GAL REOPEN\n'+JSON.stringify(g.status());});}}),
-      gal_accept: tool({description:'Accept the Advisor NEXT MOVE. Supply only reason and current-episode evidence IDs; the stored Advisor NEXT is used automatically.',args:{
-        reason:tool.schema.string(),evidence:tool.schema.array(tool.schema.string()),
-      },async execute(args,ctx){return transaction(ctx.sessionID,g=>{
-        g.contract('ACCEPT',args.reason,args.evidence,{tool:'',args:{}});
-        return 'GAL ACCEPT\nPHASE=NEXT\nEXECUTE EXACTLY: '+JSON.stringify(g.s.move);
-      });}}),
-      gal_reject: tool({description:'Reject the Advisor NEXT MOVE using objective evidence and contract one different valid observation. read {filePath}; glob {pattern,path?}; grep {pattern,path?,include?}; bash only simple git diff/status/show/log.',args:{
-        reason:tool.schema.string(),evidence:tool.schema.array(tool.schema.string()),
-        next_tool:tool.schema.enum(['read','glob','grep','bash']),next_args:tool.schema.record(tool.schema.string(),tool.schema.unknown()),
-      },async execute(args,ctx){return transaction(ctx.sessionID,g=>{
-        g.contract('REJECT',args.reason,args.evidence,{tool:args.next_tool,args:args.next_args});
-        return 'GAL REJECT\nPHASE=NEXT\nEXECUTE EXACTLY: '+JSON.stringify(g.s.move);
-      });}}),
-      gal_repair: tool({description:'Repair only a NEXT_EXECUTING observation whose correct tool visibly returned a tool/schema/infrastructure error but no completion event. Contract one different valid observation.',args:{
-        reason:tool.schema.string(),evidence:tool.schema.array(tool.schema.string()),
-        next_tool:tool.schema.enum(['read','glob','grep','bash']),next_args:tool.schema.record(tool.schema.string(),tool.schema.unknown()),
-      },async execute(args,ctx){return transaction(ctx.sessionID,g=>{
-        g.repair(args.reason,args.evidence,{tool:args.next_tool,args:args.next_args});
-        return 'GAL REPAIR\nPHASE=NEXT\nEXECUTE EXACTLY: '+JSON.stringify(g.s.move);
-      });}}),
-    },
-    'tool.execute.before':async(input,output)=>{
-      if(await isAdvisor(input.sessionID)) {
-        await transaction(input.sessionID,g=>{
-          if(!['read','glob','grep'].includes(input.tool)) throw Error('GAL Advisor is observation-only');
-          if((g.s.metrics.advisor_observations??0)>=2) throw Error('GAL Advisor observation budget exhausted; return diagnosis now');
-          g.metric('advisor_observations');
-        });
-        return;
-      }
-      await transaction(input.sessionID,g=>{
-        g.before(input.tool,output.args);
-        if(input.tool==='task'&&output.args.subagent_type==='gal-advisor') {
-          g.consult();delete output.args.task_id;output.args.prompt=g.packet();
+
+      await ctx.tool.transform(editor=>{
+        for(const [name,definition] of Object.entries(hooks.tool??{})) {
+          const schema=tool.schema.object(definition.args);
+          editor.add({
+            name,description:definition.description,input:tool.schema.toJSONSchema(schema),
+            // Control tools stay directly callable while Code Mode is blocked.
+            options:{codemode:false},
+            async execute(input,context) {
+              // Shared control tools only consume sessionID from the host context.
+              const result=await definition.execute(schema.parse(input),{sessionID:context.sessionID} as unknown as ToolContext);
+              return {content:typeof result==='string'?result:result.output};
+            },
+          });
         }
       });
-    },
-    'tool.execute.after':async(input,output)=>{
-      if(await isAdvisor(input.sessionID)) return;
-      const exit=typeof output.metadata?.exit==='number'?output.metadata.exit:undefined;
-      if(exit!==undefined&&exit!==0) failedCalls.add(input.sessionID+':'+input.callID);
-      await transaction(input.sessionID,g=>{
-        if(input.tool==='task'&&input.args.subagent_type==='gal-advisor') {g.advised(output.output);return;}
-        if(input.tool.startsWith('gal_')) return;
-        const note=g.observe(input.tool,input.args,output.output,exit);
-        if(note) output.output+='\n'+note;
-        if(g.s.phase==='REQUIRED') output.output+='\nGAL GUARD TRIGGERED. Stop retries. Invoke task subagent_type=gal-advisor.\n'+g.guardNotice();
-      });
-    },
-    'experimental.chat.system.transform':async(input,output)=>{
-      if(!input.sessionID||await isAdvisor(input.sessionID)) return;
-      await transaction(input.sessionID,g=>{
-        if(g.s.phase==='RUNNING'&&g.s.completion) {
-          const reopen=g.s.completionReopen;
-          const msg=reopen
-            ?(reopen.editUsed
-              ?'GAL COMPLETION REOPEN. The one authorized corrective edit is used. Do not edit or run ad-hoc bash; run recognized verification now.'
-              :'GAL COMPLETION REOPEN. Fresh evidence authorized exactly one corrective edit. Ad-hoc bash remains blocked; after the edit run recognized verification.')
-            :'GAL COMPLETION CHECKPOINT. Verification passed and the OpenSpec task is marked complete. Do not edit or run ad-hoc bash. Observe with read/grep/glob/read-only git or rerun recognized verification. If new evidence proves a defect remains, use gal_reopen(reason,evidence).';
-          if(output.system.length>0) output.system[output.system.length-1]+='\n'+msg;
-          else output.system.push(msg);
-        } else if(g.s.phase!=='RUNNING') {
-          let msg='GAL '+g.s.phase+'. No retries or edits.';
-          if(g.s.phase==='NEXT'&&g.s.move) msg+='\nEXECUTE NOW — tool: '+g.s.move.tool+', args: '+JSON.stringify(g.s.move.args)+'\nPreserve the contracted values. Safe optional read/grep/glob args may be added.';
-          else if(g.s.phase==='NEXT_EXECUTING') msg+='\nThe contracted observation started but completion was not observed. Do not use ACCEPT/REJECT here. Only if the correct NEXT visibly returned a tool/schema/infrastructure error without a completion event, call gal_repair with current evidence and a different valid observation.';
-          else msg+=' '+g.guardNotice();
-          if(output.system.length>0) output.system[output.system.length-1]+='\n'+msg;
-          else output.system.push(msg);
+
+      await ctx.tool.hook('execute.before',async event=>{
+        monitor.end(event.sessionID);
+        const native=record(event.input);
+        const call=canonicalMove({tool:event.tool,args:native});
+        const output={args:call.args};
+        await hooks['tool.execute.before']!({sessionID:event.sessionID,tool:call.tool,callID:event.id},output);
+        if(event.tool==='subagent'&&native.agent==='gal-advisor') {
+          const args:Record<string,unknown>={...native,prompt:output.args.prompt};
+          delete args.sessionID;
+          delete args.task_id;
+          event.input=args;
         }
       });
-    },
-    event:async({event})=>{
-      if(event.type!=='message.part.updated') return;
-      const part=event.properties.part;
-      if(part.type!=='tool') return;
-      const state=part.state;
-      if(state.status!=='error'||state.error.startsWith('GAL ')) return;
-      if(part.tool.startsWith('gal_')) return;
-      const callKey=part.sessionID+':'+part.callID;
-      if(failedCalls.has(callKey)) return;
-      failedCalls.add(callKey);
-      if(await isAdvisor(part.sessionID)) return;
-      await transaction(part.sessionID,g=>{
-        if(part.tool==='task'&&g.s.phase==='CONSULTING') {g.exhaust('Advisor task failed; no automatic retry');return;}
-        g.observe(part.tool,state.input,state.error,1);
+
+      await ctx.tool.hook('execute.after',async event=>{
+        const call=canonicalMove({tool:event.tool,args:record(event.input)});
+        if(event.status==='error') {
+          await hooks.event!({event:{type:'message.part.updated',properties:{part:{
+            type:'tool',id:event.id,messageID:event.messageID,sessionID:event.sessionID,callID:event.id,tool:call.tool,
+            state:{status:'error',input:call.args,error:event.error.message,time:{start:0,end:0}},
+          }}}});
+          return;
+        }
+        const structured=event.result.output as {exit?:number;status?:string;shellID?:string;timeout?:boolean}|undefined;
+        if(call.tool==='bash'&&(structured?.status==='running'||event.result.metadata?.status==='running')) {
+          const shellID=structured?.shellID??event.result.metadata?.shellID;
+          if(typeof shellID!=='string') throw Error('GAL cannot track background shell without shellID');
+          await hooks.deferShell(event.sessionID,shellID,call.args,event.id);
+          return;
+        }
+        let content=text(event.result);
+        if(call.tool==='task'&&call.args.subagent_type==='gal-advisor') {
+          const result=event.result.output as {sessionID?:string;status?:string;output?:string}|undefined;
+          if(result?.status==='running') {
+            try {
+              if(!result.sessionID) throw Error('Advisor result has no sessionID');
+              const sessionID=result.sessionID as SessionID;
+              await ctx.session.wait({sessionID});
+              const messages=await ctx.session.context({sessionID});
+              const response=messages.findLast(message=>message.type==='assistant');
+              content=response?.type==='assistant'?response.content.filter(p=>p.type==='text').map(p=>p.text).join(''):'';
+            } catch(error) {
+              content='Advisor task failed: '+(error instanceof Error?error.message:String(error));
+            }
+          } else if(typeof result?.output==='string') content=result.output;
+        }
+        const metadata=event.result.metadata??{};
+        const exit=typeof metadata.exit==='number'?metadata.exit:structured?.exit??(metadata.timeout||structured?.timeout?1:undefined);
+        const output={title:event.tool,output:content,metadata:{...metadata,_galResult:event.result.output,...(exit===undefined?{}:{exit})}};
+        await hooks['tool.execute.after']!({sessionID:event.sessionID,tool:call.tool,callID:event.id,args:call.args},output);
+        // Preserve structured output, metadata, and file attachments while adding notices.
+        if(output.output!==text(event.result)) {
+          const attachments=Array.isArray(event.result.content)?event.result.content.filter(p=>p.type!=='text'):[];
+          event.result={...event.result,content:attachments.length?[...attachments,{type:'text',text:output.output}]:output.output};
+        }
       });
+
+      await ctx.session.hook('context',async event=>{
+        let notes:string[]=[];
+        if(event.agent!=='gal-advisor') {
+          const messages=await ctx.session.context({sessionID:event.sessionID});
+          const notifications=messages.flatMap(message=>{
+            if(message.type!=='synthetic'||message.metadata?.source!=='shell'||typeof message.metadata.shellID!=='string') return [];
+            const exit=typeof message.metadata.exit==='number'?message.metadata.exit:
+              message.metadata.timeout||message.metadata.state==='error'||message.metadata.state==='cancelled'?1:undefined;
+            return [{shellID:message.metadata.shellID,output:message.text,exit}];
+          });
+          notes=await hooks.completeShells(event.sessionID,notifications);
+        }
+        const output={system:[notes.join('\n')]};
+        await hooks['experimental.chat.system.transform']!({sessionID:event.sessionID,model:{} as never},output);
+        if(!output.system[0]) return;
+        const last=event.system.at(-1);
+        if(last?.type==='text') event.system[event.system.length-1]={...last,text:last.text+'\n'+output.system[0].trimStart()};
+        else event.system.push({type:'text',text:output.system[0].trimStart()});
+      });
+      return async()=>{controller.abort();if(timer) clearInterval(timer);monitor.clear();hooks.monitorState.active=false;await events?.catch(()=>{});};
     },
-  };
+  }),
+  server,
 };
-export default GalLoopGuard;

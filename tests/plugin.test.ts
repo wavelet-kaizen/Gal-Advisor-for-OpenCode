@@ -3,8 +3,9 @@ import assert from 'node:assert/strict';
 import { mkdtemp, rm, readFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, dirname, resolve } from 'node:path';
-import plugin from '../.opencode/plugins/gal-loop-guard.ts';
+import entrypoint from '../.opencode/plugins/gal-loop-guard.ts';
 import type { PluginInput } from '@opencode-ai/plugin';
+const plugin=entrypoint.server;
 
 test('1.18.31 hooks: lockout, fresh task packet, persistence, advisor isolation',async()=>{
   const directory=await mkdtemp(join(tmpdir(),'gal-test-'));

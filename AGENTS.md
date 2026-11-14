@@ -2,6 +2,18 @@
 
 Applies to the main agent. The gal-advisor subagent follows its own diagnostic-only prompt.
 
+Use the host's tool vocabulary. OpenCode 1.x uses task with subagent_type,
+bash, and read/edit/write with filePath. OpenCode 2.x uses subagent with agent,
+shell, and read/edit/write with path. References below to task/bash describe
+the same operations in either host. Never pass task_id (V1) or sessionID (V2)
+to an Advisor consultation. Follow the native tool/args returned by Gal's NEXT contract.
+gal_inspect_text is a read-only observation and may be a contracted NEXT. It counts
+toward the Advisor's two-observation budget. Preserve reported codepoints and bytes.
+When strict completion is registered, all requiredChecks must pass for the selected
+taskIDs and current source contents. A launch acknowledgement is not verification PASS.
+Generation holds preserve phase, contracts and consultation budgets; a hold alone
+does not authorize REPAIR, another consultation, or replay of NEXT_EXECUTING.
+
 After failed verification, ask whether new objective evidence was produced.
 Stop edits and retries immediately when the same failure survives two fixes,
 the same tool fails twice, three edits leave the failure unchanged, searches
@@ -19,7 +31,8 @@ SUPPORTED / REFUTED / UNTESTED plus evidence IDs from gal_status. Report visible
 manual_verification / contradicted_baseline signals immediately. Never inspect
 or report hidden chain of thought. Semantic detection is cooperative, not guaranteed.
 
-When triggered, invoke task with subagent_type=gal-advisor. Never provide task_id:
+When triggered, invoke task with subagent_type=gal-advisor (V1), or subagent
+with agent=gal-advisor (V2). Never provide task_id or sessionID:
 each consultation needs fresh context. The plugin supplies a bounded evidence packet.
 Then state GAL ACCEPT or GAL REJECT. Use the decision-specific recovery tool:
 gal_accept(reason,evidence) uses the Advisor NEXT and accepts no replacement move;

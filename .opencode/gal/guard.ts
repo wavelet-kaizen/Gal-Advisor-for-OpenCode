@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto';
+import { diagnostic as javaDiagnostic, junit, simpleVerification, verify, type Verification } from './verification.ts';
 
 export const hash = (v: unknown): string => createHash('sha256').update(stable(v)).digest('hex');
 export function stable(v: unknown): string {
@@ -12,9 +13,9 @@ export type FailureKind = 'verification'|'cli_usage'|'shell_mismatch'|'tooling';
 export type Phase = 'RUNNING'|'REQUIRED'|'CONSULTING'|'CONTRACT'|'NEXT'|'NEXT_EXECUTING'|'EXHAUSTED';
 type Evidence = { id: string; tick?: number; tool: string; args: Record<string, unknown>; output: string; signature: string; kind?: FailureKind };
 type InvestigationObservation = { tick: number; tool: string; subject: string; fingerprint: string; stale: boolean };
-const STATE_SCHEMA_VERSION=2;
+const STATE_SCHEMA_VERSION=3;
 
-const RECOVERY_TOOLS=new Set(['read','glob','grep','bash']);
+const RECOVERY_TOOLS=new Set(['read','glob','grep','bash','gal_inspect_text']);
 const simpleGit=/^git (?:diff|status|show|log)(?: [a-zA-Z0-9_./\\:@{},+ -]+)?$/;
 const dangerousGit=/--(?:output|ext-diff|textconv|config)/;
 
@@ -33,6 +34,12 @@ function optionalNumber(args:Record<string,unknown>,key:string) {
 export function validateMove(move:Move) {
   if(!move||typeof move.tool!=='string'||!move.args||Array.isArray(move.args)||typeof move.args!=='object') throw Error('NEXT must contain one tool and args object');
   if(!RECOVERY_TOOLS.has(move.tool)) throw Error('NEXT must be one observation tool');
+  if(move.tool==='gal_inspect_text') {
+    requireString(move.args,'path');
+    if(move.args.encoding!==undefined&&move.args.encoding!=='utf-8') throw Error('NEXT encoding must be utf-8');
+    for(const key of ['startLine','lineCount']) if(move.args[key]!==undefined&&(!Number.isInteger(move.args[key])||Number(move.args[key])<1)) throw Error('NEXT '+key+' must be a positive integer');
+    if(Number(move.args.lineCount)>100) throw Error('NEXT lineCount exceeds 100');
+  }
   if(move.tool==='read') {requireString(move.args,'filePath');optionalNumber(move.args,'offset');optionalNumber(move.args,'limit');}
   if(move.tool==='glob') {requireString(move.args,'pattern');optionalString(move.args,'path');}
   if(move.tool==='grep') {requireString(move.args,'pattern');optionalString(move.args,'path');optionalString(move.args,'include');}
@@ -86,6 +93,10 @@ function commandFamily(tool:string,args:Record<string,unknown>) {
   return String(args.command??'').trim().split(/\s+/).slice(0,2).join(' ');
 }
 function investigationSubject(tool:string,args:Record<string,unknown>,clean:string) {
+  if(tool==='gal_inspect_text') {
+    let path=args.path;try{path=JSON.parse(clean).path??path;}catch{}
+    return 'text:'+normPath(String(path)).toLowerCase()+':'+String(args.startLine??1)+':'+String(args.lineCount??20);
+  }
   if(tool==='read'&&typeof args.filePath==='string'&&args.filePath.trim()) {
     return normPath(String(args.filePath)).toLowerCase();
   }
@@ -104,18 +115,17 @@ function investigationSubject(tool:string,args:Record<string,unknown>,clean:stri
 }
 function investigationFingerprint(clean:string) {
   const normalized=clean
-    .replace(/\b0x[0-9a-f]+\b/gi,'<hex>')
-    .replace(/\b[0-9a-f]{7,64}\b/gi,'<id>')
-    .replace(/:\d+(?::\d+)?\b/g,':<n>')
-    .replace(/\b\d+(?:\.\d+)?\b/g,'<n>')
+    .replace(/\b(?:line|column)\s+\d+/gi,'line <n>')
+    .replace(/(\.(?:java|jsp|jspx|[cm]?[jt]s|tsx|py|md)):\d+(?::\d+)?\b/gi,'$1:<n>')
+    .replace(/\b\d+(?:\.\d+)?\s*ms\b/g,'<time>')
     .replace(/\s+/g,' ')
     .trim()
     .toLowerCase()
-    .slice(0,2400);
+    ;
   return hash(normalized||'(empty)');
 }
 function investigationEligible(tool:string,args:Record<string,unknown>) {
-  if(!['read','grep','glob','bash'].includes(tool)) return false;
+  if(!['read','grep','glob','bash','gal_inspect_text'].includes(tool)) return false;
   if(tool==='bash'&&verificationBash(args)) return false;
   return true;
 }
@@ -135,6 +145,7 @@ function goalFreeBash(args:Record<string,unknown>) {
   );
 }
 function verificationBash(args:Record<string,unknown>) {
+  if(simpleVerification(String(args.command??''))) return true;
   const segments=shellSegments(args).filter(segment=>!shellNavigation(segment));
   if(segments.length!==1) return false;
   const command=segments[0];
@@ -203,6 +214,10 @@ export type State = {
   completion?: {tick:number; revision:number; path:string; verificationTick:number; command:string};
   completionReopen?: {tick:number; evidence:string[]; editUsed:boolean};
   investigation: InvestigationObservation[];
+  pendingShells?: Record<string,Record<string,unknown>>;
+  strict?: {changePath:string;taskIDs:string[];requiredChecks:string[];done:boolean;checks:Record<string,{verdict:string;digest:string;scope:string;revision:number}>};
+  executions?: Record<string,{executionKey:string;checkID:string;digest:string;args:Record<string,unknown>;revision:number;finished?:boolean}>;
+  generationHold?: {requestID:string;incidentID:string;phase:Phase;status:'pending'|'confirmed'|'unknown';reason:string};
   metrics: Record<string,number>;
 };
 export const initial = (): State => ({
@@ -228,9 +243,9 @@ function migrateLegacyState(source:StoredState):State {
 }
 function normalizeState(s:State):State {
   const source=s as StoredState;
-  if(source.schemaVersion!==STATE_SCHEMA_VERSION) return migrateLegacyState(source);
+  if(source.schemaVersion!==STATE_SCHEMA_VERSION&&source.schemaVersion!==2) return migrateLegacyState(source);
   const b=initial();
-  return {...b,...source,evidence:source.evidence??[],repeats:source.repeats??{},calls:source.calls??{},hypotheses:source.hypotheses??{},signals:source.signals??[],investigation:source.investigation??[],metrics:source.metrics??{}};
+  return {...b,...source,schemaVersion:STATE_SCHEMA_VERSION,evidence:source.evidence??[],repeats:source.repeats??{},calls:source.calls??{},hypotheses:source.hypotheses??{},signals:source.signals??[],investigation:source.investigation??[],metrics:source.metrics??{}};
 }
 function compactEvidence(e:Evidence) {
   return {
@@ -248,7 +263,40 @@ export class Guard {
     this.repairLoadedState();
   }
   metric(k:string) {this.s.metrics[k]=(this.s.metrics[k]??0)+1;}
+  holdGeneration(requestID:string,incidentID:string,reason='generation_budget_exceeded') {
+    if(this.s.generationHold) return;
+    this.s.generationHold={requestID,incidentID,phase:this.s.phase,status:'pending',reason};
+    this.metric('generation_holds');
+  }
+  confirmGeneration(requestID:string,confirmed:boolean) {
+    if(this.s.generationHold?.requestID!==requestID) return;
+    this.s.generationHold.status=confirmed?'confirmed':'unknown';
+  }
+  resumeGeneration(requestID:string,explicitUser:boolean) {
+    const hold=this.s.generationHold;
+    if(!explicitUser||hold?.requestID!==requestID||hold.status!=='confirmed') throw Error('GAL cancellation confirmation and explicit user resume required');
+    // Never restore an old phase over a completion observed while held.
+    this.s.generationHold=undefined;
+    if(hold.phase==='RUNNING'&&this.s.phase==='RUNNING') this.trigger(hold.reason);
+  }
+  recordCheck(id:string,scope:string,verdict:string,digest:string) {
+    if(this.s.strict?.requiredChecks.includes(id)) this.s.strict.checks[id]={scope,verdict,digest,revision:this.s.revision};
+  }
+  refreshCompletion(done:boolean,digests:Record<string,string>) {
+    const strict=this.s.strict;if(!strict) return;
+    strict.done=done;
+    for(const [id,check] of Object.entries(strict.checks)) if(!digests[id]||digests[id]!==check.digest) check.verdict='UNKNOWN';
+    const ready=done&&strict.requiredChecks.every(id=>strict.checks[id]?.verdict==='PASS'&&digests[id]===strict.checks[id].digest&&(!this.s.completionReopen?.editUsed||strict.checks[id].revision===this.s.revision));
+    if(!ready) {
+      if(this.s.completion&&!this.s.completionReopen?.editUsed){this.s.completion=undefined;this.s.completionReopen=undefined;this.metric('completion_invalidated');}
+      return;
+    }
+    if(this.s.phase!=='RUNNING'||this.s.generationHold||this.s.completion&&(!this.s.completionReopen||!this.s.completionReopen.editUsed)) return;
+    this.s.completion={tick:this.s.tick,revision:this.s.revision,path:strict.changePath,verificationTick:this.s.tick,command:strict.requiredChecks.join(',')};
+    this.s.completionReopen=undefined;this.metric('completion_checkpoints');
+  }
   private repairLoadedState() {
+    if(this.s.generationHold) return; // Reconcile in-flight execution before any replay.
     if(this.s.phase==='NEXT_EXECUTING') {
       if(this.s.move) {
         try {validateMove(this.s.move);this.s.phase='NEXT';this.s.executing=undefined;this.metric('state_repairs');return;} catch {}
@@ -283,6 +331,8 @@ export class Guard {
       completionReopen:this.s.completionReopen,
       completionMarker:this.s.completionMarker,
       lastVerification:this.s.lastVerification,
+      strict:this.s.strict,
+      generationHold:this.s.generationHold,
       investigation:this.investigationSummary(),
       episodeStartTick:this.s.episodeStartTick,
       evidenceCount:evidence.length,
@@ -342,6 +392,7 @@ export class Guard {
     }
   }
   private armCompletion() {
+    if(this.s.strict) return undefined;
     const marker=this.s.completionMarker,verification=this.s.lastVerification;
     if(!marker||!verification) return undefined;
     this.s.completion={tick:this.s.tick,revision:this.s.revision,path:marker.path,verificationTick:verification.tick,command:verification.command};
@@ -383,7 +434,13 @@ export class Guard {
     if(!reason.trim()||evidence.length===0||!evidence.every(id=>after.some(e=>e.id===id))) throw Error('GAL REOPEN requires a reason and evidence produced after the completion checkpoint');
     this.s.completionReopen={tick:this.s.tick,evidence:[...evidence],editUsed:false};this.metric('completion_reopens');
   }
-  report(input:{goal?:string; hypothesis?:string; status?:string; evidence?:string[]; signal?:string}) {
+  report(input:{goal?:string; hypothesis?:string; status?:string; evidence?:string[]; signal?:string;changePath?:string;taskIDs?:string[];requiredChecks?:string[]}) {
+    if(input.changePath||input.taskIDs||input.requiredChecks) {
+      if(this.s.strict) throw Error('GAL strict task registration is immutable; start a new session for another task');
+      if(!input.changePath||!input.taskIDs?.length||!input.requiredChecks?.length) throw Error('GAL strict completion requires changePath, taskIDs and requiredChecks');
+      this.s.strict={changePath:input.changePath,taskIDs:input.taskIDs,requiredChecks:input.requiredChecks,done:false,checks:{}};
+      this.s.completion=undefined;
+    }
     if(input.goal&&!this.s.goal) this.s.goal=input.goal;
     if(input.hypothesis) {
       const old=this.s.hypotheses[input.hypothesis];
@@ -445,8 +502,11 @@ export class Guard {
     if(this.s.executing&&matchesMove(move,this.s.executing.tool,this.s.executing.args)) throw Error('REPAIR must choose a different observation');
     this.s.move=move;this.s.executing=undefined;this.s.phase='NEXT';this.metric('advisor_repair');
   }
-  before(tool:string,args:Record<string,unknown>) {
+  before(tool:string,args:Record<string,unknown>,configuredVerification=false) {
     if(tool==='gal_status') return;
+    if(this.s.generationHold) {
+      throw Error('GAL GENERATION HOLD: wait for cancellation confirmation and explicit user resume; phase and NEXT contract are preserved');
+    }
     if(this.s.phase==='EXHAUSTED') throw Error('GAL EXHAUSTED: stop autonomous debugging and report facts to user. '+this.s.reason);
     if(tool==='gal_report'&&this.s.phase==='RUNNING') return;
     if(tool==='gal_reopen'&&this.s.phase==='RUNNING'&&this.s.completion) return;
@@ -454,7 +514,7 @@ export class Guard {
       this.metric('goal_gate_blocks');
       throw Error('GAL GOAL REQUIRED: register the current task goal with gal_report(goal=...) before edits or verification. This tool did not run. Read/glob/grep and read-only OpenSpec/git discovery remain allowed.');
     }
-    if(this.s.phase==='RUNNING'&&this.s.completion&&completionGateBlocks(tool,args)) {
+    if(this.s.phase==='RUNNING'&&this.s.completion&&completionGateBlocks(tool,args)&&!configuredVerification) {
       const mutation=['edit','write','apply_patch','patch'].includes(tool);
       if(mutation&&this.s.completionReopen&&!this.s.completionReopen.editUsed) return;
       this.metric('post_success_blocks');
@@ -475,7 +535,7 @@ export class Guard {
     if(this.s.phase==='NEXT_EXECUTING') throw Error('GAL GUARD NEXT_EXECUTING: the contracted observation started but completion was not observed. REPAIR is valid only if the correct NEXT visibly returned a tool/schema/infrastructure error without a completion event; then call gal_repair with a different valid observation.');
     if(this.s.phase!=='RUNNING') throw Error('GAL GUARD '+this.s.phase+': '+this.guardNotice());
   }
-  observe(tool:string,args:Record<string,unknown>,output:string,exit?:number):string|undefined {
+  observe(tool:string,args:Record<string,unknown>,output:string,exit?:number,verification?:Verification):string|undefined {
     let recovered=false;
     if(this.s.phase==='NEXT_EXECUTING'&&this.s.move&&matchesMove(this.s.move,tool,args)) {
       recovered=true;this.s.phase='RUNNING';this.s.move=undefined;this.s.executing=undefined;this.resetLoopCounters();this.metric('recovery_observations');
@@ -488,7 +548,7 @@ export class Guard {
       const markerChange=completionMarkerChange(tool,args);
       const reopenEdit=!!(this.s.completion&&this.s.completionReopen&&!this.s.completionReopen.editUsed);
       this.addEvidence(tool,args,clean,signature);
-      this.s.investigation=[];
+      this.s.investigation=this.s.investigation.filter(x=>!editPaths(args).some(path=>sameFile(x.subject,path)));
       this.s.revision++;
       const paths=editPaths(args);
       if(this.s.failureFile&&paths.some(p=>sameFile(p,this.s.failureFile))) {this.s.relevantRevision++;this.s.edits++;}
@@ -508,22 +568,27 @@ export class Guard {
 
     const error=clean.match(/(?:SyntaxError|AssertionError|TypeError|ReferenceError|Error):[^\n]*/)?.[0];
     const count=clean.match(/# fail (\d+)|Tests:\s+(\d+) failed/);
-    const failedCount=count?Number(count[1]??count[2]):undefined;
-    const failed=exit!==undefined?exit!==0:(tool==='bash'&&(!!error||(failedCount!==undefined&&failedCount>0)));
+    const summary=junit(clean);
+    const failedCount=summary?summary.failures+summary.errors:count?Number(count[1]??count[2]):undefined;
+    const java=javaDiagnostic(clean);
+    const automatic=tool==='bash'?simpleVerification(String(args.command??'')):undefined;
+    verification??=automatic?verify(clean,exit,automatic):tool==='bash'&&/Tests run:|<testsuite\b/.test(clean)?verify(clean,exit,'test'):undefined;
+    if(automatic==='command'&&verification?.verdict==='PASS'&&!summary&&!/\bBUILD SUCCESSFUL\b/.test(clean)) verification={...verification,verdict:'UNKNOWN'};
+    const failed=verification?verification.verdict==='FAIL':exit!==undefined?exit!==0:(tool==='bash'&&(!!error||(failedCount!==undefined&&failedCount>0)));
     const key=hash({tool,args});
     const location=clean.match(/([^\s()]+\.(?:[cm]?[jt]s|tsx|py)):(\d+)/);
-    const file=location?.[1]??'';
-    const bucket=location?Math.floor(Number(location[2])/10):undefined;
+    const file=location?.[1]??(java?.path&&/[\\/]/.test(java.path)?java.path:'');
+    const bucket=location?Math.floor(Number(location[2])/10):java?.line?Math.floor(java.line/10):undefined;
     const family=commandFamily(tool,args);
     let note:string|undefined;
 
     if(failed) {
-      if(tool==='bash'&&verificationBash(args)&&this.s.completion) {
+      if(tool==='bash'&&(verification||verificationBash(args))&&this.s.completion) {
         this.s.completion=undefined;this.s.completionReopen=undefined;this.s.lastVerification=undefined;this.metric('completion_invalidated');
       }
-      const diagnostic=diagnosticLine(clean,error,failedCount);
-      const kind=classifyFailure(clean,error,failedCount);
-      const problemSignature=hash({kind,diagnostic,file,bucket});
+      const diagnostic=failedCount!==undefined?'test failures':java?.message??diagnosticLine(clean,error,failedCount);
+      const kind=java||failedCount!==undefined?'verification':classifyFailure(clean,error,failedCount);
+      const problemSignature=hash({kind,diagnostic,file,bucket,scope:args._galCheck});
       const failure=hash({kind,diagnostic,file,bucket,family});
       const newProblem=!this.s.problemSignature||this.s.problemSignature!==problemSignature;
       const priorFailure=this.s.failure;
@@ -549,8 +614,8 @@ export class Guard {
       if(kind==='cli_usage') {this.metric('cli_usage_errors');note='GAL NOTE: CLI usage error detected. Check the command help/flags before changing project files.';}
     } else {
       this.addEvidence(tool,args,clean,signature);
-      if(tool==='bash'&&this.s.problem&&key===this.s.problemOperation) {this.closeProblem();this.metric('progress');}
-      if(tool==='bash'&&verificationBash(args)) {
+      if((!verification||verification.verdict==='PASS')&&tool==='bash'&&this.s.problem&&key===this.s.problemOperation) {this.closeProblem();this.metric('progress');}
+      if(verification?.verdict==='PASS'||!verification&&tool==='bash'&&verificationBash(args)&&exit===0) {
         this.s.investigation=[];
         this.s.lastVerification={tick:this.s.tick,revision:this.s.revision,command:String(args.command??''),signature};
         this.metric('verification_passes');

@@ -1,0 +1,17 @@
+{
+  "checks": [
+    {
+      "id": "unit",
+      "scope": "all-unit-tests",
+      "kind": "test",
+      "command": "ant test",
+      "paths": ["build.xml", "src/Example.java", "test/ExampleTest.java"]
+    }
+  ],
+  "generation": {
+    "mode": "off",
+    "warnAfterSeconds": 180,
+    "maxSeconds": 600,
+    "advisorMaxSeconds": 180
+  }
+}

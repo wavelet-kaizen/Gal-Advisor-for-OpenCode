@@ -1,1 +1,1 @@
-{"private":true,"type":"module","dependencies":{"@opencode-ai/plugin":"1.18.31"}}
+{"private":true,"type":"module","dependencies":{"@opencode-ai/plugin":"1.18.31","@opencode/plugin":"2.0.0"}}

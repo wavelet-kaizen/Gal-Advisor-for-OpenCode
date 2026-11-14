@@ -1,4 +1,4 @@
-# Gal Advisor for OpenCode 1.18.31
+# Gal Advisor for OpenCode 1.x / 2.x
 
 証拠の増えない反復を止め、独立した診断と「次の1操作」の契約で復帰するハーネスです。
 Qwenを主エージェントとして使う場合を想定していますが、主モデルは固定しません。
@@ -7,8 +7,13 @@ Qwenを主エージェントとして使う場合を想定していますが、�
 
 - `AGENTS.md`: 主エージェント向けの検知・引き継ぎ・復帰ルール。グローバル用の追記にも使えます。
 - `.opencode/agents/gal-advisor.md`: fresh contextで動く診断subagent。`steps: 5`、読み取り専用。
-- `.opencode/plugins/gal-loop-guard.ts`: **V1 API**による実行前ロック、相談制限、復帰ツール。
-- `.opencode/gal/guard.ts`: 検知と状態遷移。プラグインと一緒にコピーしてください。
+- `.opencode/plugins/gal-loop-guard.ts`: V1の `server()` とV2の `setup()` を持つ共通エントリーポイント。
+- `.opencode/gal/plugin.ts`: セッション別永続化、相談制限、復帰ツールの共通処理。
+- `.opencode/gal/guard.ts`: 検知と状態遷移。
+- `.opencode/gal/` の他モジュール: 検証、設定、文字検査、生成通知。フォルダー全体をプラグインと一緒にコピーしてください。
+
+既存の対象であるOpenCode **1.18.31**を維持し、**2.0.0 / 2.2.0 / 2.3.0**の公式SDKに対応します。
+共通エントリーポイントのオブジェクト形式は1.18.29以降で利用できます。それ以前の1.xは対象外です。
 
 ## 導入
 
@@ -17,8 +22,17 @@ Qwenを主エージェントとして使う場合を想定していますが、�
 既存の指示を置き換えないでください。この方式の停止・回数管理はモデルの協力に依存します。
 
 強制ガードも使う場合は `.opencode/plugins/gal-loop-guard.ts` と
-`.opencode/gal/guard.ts` を同じ構造でコピーし、対象の `.opencode/package.json` の
-dependenciesへ `"@opencode-ai/plugin": "1.18.31"` を追加します。
+`.opencode/gal/` フォルダー全体を同じ構造でコピーし、対象の `.opencode/package.json` の
+dependenciesへ次を追加します。既存のdependenciesは残してください。
+
+```json
+{
+  "@opencode-ai/plugin": "1.18.31",
+  "@opencode/plugin": "2.0.0"
+}
+```
+
+両SDKは共通処理から使用するため、利用するOpenCodeの世代によらず両方必要です。
 このプロジェクト自身にはすべて配置済みです。OpenCodeを再起動すると読み込まれます。
 
 全プロジェクトで使う場合の配置先:
@@ -27,7 +41,7 @@ dependenciesへ `"@opencode-ai/plugin": "1.18.31"` を追加します。
 ~/.config/opencode/AGENTS.md                  ← 追記
 ~/.config/opencode/agents/gal-advisor.md
 ~/.config/opencode/plugins/gal-loop-guard.ts
-~/.config/opencode/gal/guard.ts
+~/.config/opencode/gal/                       ← フォルダー全体
 ~/.config/opencode/package.json              ← dependenciesをマージ
 ```
 
@@ -38,6 +52,31 @@ Advisorを別モデルにするには、そのfrontmatterへ利用可能な
 `model: provider/model-id` を追加します。省略時は親モデルを継承します。
 APIキーや架空のモデルIDは同梱しません。
 
+## 1.xから2.xへの移行
+
+既存のプラグインだけを上書きせず、`plugins/gal-loop-guard.ts`、`gal/` フォルダー全体と
+両SDKの依存指定をまとめて更新してください。
+`.gal-state/` の状態・証拠ID・相談予算は引き継ぎます。保存形式は内部で1.x相当へ正規化し、
+2.xのツール応答・NEXT契約にはネイティブの名前を返します。
+
+| 操作 | OpenCode 1.x | OpenCode 2.x |
+|---|---|---|
+| Advisor相談 | `task` + `subagent_type: gal-advisor` | `subagent` + `agent: gal-advisor` |
+| 既存相談のID（指定禁止） | `task_id` | `sessionID` |
+| コマンド | `bash` | `shell` |
+| read/edit/writeの対象 | `filePath` | `path` |
+| 制御ツール | `gal_status`、`gal_report`、`gal_accept`など | 同じ名前 |
+
+2.xの非同期Advisorは、完了までCONSULTINGを維持し、最終応答のテキストだけを診断として扱います。
+非同期shellの開始応答はverification PASSに数えず、完了通知を次のモデル要求前に一度だけ観測します。
+未完了shellの対応情報も永続化します。制御ツールはCode Modeを経由せず直接呼べる形で登録します。
+
+同梱Advisorのfrontmatterは1.x形式のままです。2.xはこの形式を互換読み込みし、権限を変換します。
+ネイティブ2.x形式へ手動変換する場合は、`permission` を `permissions` 配列へ、
+権限名 `bash` / `task` を `shell` / `subagent` へ変換し、包括的denyより後にread/glob/grepのallowを置いてください。
+ローカルの `.opencode/plugins/` は両世代で自動検出されるため、設定への重複登録は不要です。
+設定に明示登録している場合、2.xでは `plugin` ではなく `plugins` を使用します。
+
 ## 動作
 
 ```text
@@ -46,7 +85,7 @@ RUNNING → REQUIRED → CONSULTING → CONTRACT → NEXT → NEXT_EXECUTING →
                                                 └─ hook/infra失敗 → REPAIR → NEXT
 ```
 
-停止中は、`gal_status`、許可された段階の制御ツール、Advisorへの `task`、
+停止中は、`gal_status`、許可された段階の制御ツール、Advisorへの `task`（2.xでは `subagent`）、
 契約したNEXT以外のツール呼び出しを拒否します。bashや別subagentによる迂回も拒否します。
 すでに実行中の操作を巻き戻す機能はありません。
 
@@ -55,8 +94,8 @@ RUNNING → REQUIRED → CONSULTING → CONTRACT → NEXT → NEXT_EXECUTING →
    主エージェント自身が `gal_report(goal=...)` で現在タスクを短く登録すると、そのままRUNNINGで再開できます。
    `gal_status` は既定でcompact表示（phase/reason/契約状態/current evidence summary/metrics）だけを返します。
    永続state全体が明示的に必要な診断時だけ `gal_status` の `raw: true` を使用してください。
-2. Guardが停止したら `task` の `subagent_type: gal-advisor` を呼びます。
-   プラグインはプロンプトを診断パケットに置換し、`task_id` を取り除いてfresh contextを確保します。
+2. Guardが停止したら `task` の `subagent_type: gal-advisor`（2.xでは `subagent` の `agent: gal-advisor`）を呼びます。
+   プラグインはプロンプトを診断パケットに置換し、`task_id` / `sessionID` を取り除いてfresh contextを確保します。
 3. Advisorは6セクション、NEXT MOVEには `{"tool":"...","args":{...}}` を1個返します。
 4. 主エージェントはdecision別ツールを使います。
    `gal_accept(reason,evidence)` はAdvisorのNEXTをそのまま採用し、置換moveを入力できません。
@@ -79,6 +118,8 @@ EXHAUSTEDからモデル自身が解除するツールはありません。ユ�
 ユーザーが問題を整理して新しいセッションを開始すると新しい予算になります。
 
 ## 検知範囲と限界
+
+以下の `bash` は2.xでは `shell`、`task` は2.xでは `subagent` と読み替えてください。
 
 | 条件 | 実装 |
 |---|---|
@@ -124,8 +165,13 @@ NEXTのbashは単純なgit観測コマンドに限定します。Git設定自体
 npm ci
 npm test
 npm run typecheck
-opencode debug config
 ```
+
+CIはSDK 2.0.0 / 2.2.0 / 2.3.0のマトリクスで、1.xの既存テストと2.xの互換テストを実行します。
+2.x側は公式の型でフック・ツール登録を模擬し、fresh context、非同期診断完了待ち、
+NEXTのネイティブ引数変換、errorイベント、Advisor分離、completion checkpoint、
+非同期shellの完了通知と再読み込みを確認します。
+実際のモデルを使用した対話診断は自動テストに含みません。
 
 Qwenのテストは依頼文の事例から再構成したものです。未提供の実ログを取り込んだものではありません。
 HEAD PASS / WORKTREE FAILの証拠登録、REFUTED仮説の再採用、TDDの8→3→1、
@@ -142,7 +188,65 @@ false_positive判定や解決率は自動推定しません。
 
 ## API根拠
 
-実装は[V1.18.31のPlugin型定義](https://github.com/anomalyco/opencode/blob/v1.18.31/packages/plugin/src/index.ts)
-と[公式V1プラグイン説明](https://opencode.ai/docs/plugins/)に合わせています。
-V2のPlugin.define、permissions配列、context.tools変更は使っていません。
-エージェント設定はV1の `permission`、`bash`、`task` を使用します。
+V1は[V1.18.31のPlugin型定義](https://github.com/anomalyco/opencode/blob/v1.18.31/packages/plugin/src/index.ts)、
+V2は[公式移行ガイド](https://opencode.ai/docs/build/plugins/migrate-v1/)と
+[Server API](https://opencode.ai/docs/build/plugins/server/)を根拠にしています。
+V2の `Plugin.define`、`ctx.tool.transform`、`ctx.tool.hook`、`ctx.session.hook("context")` を使用し、
+ツールの成功・失敗を `execute.after` で処理します。
+[設定の互換読み込み](https://opencode.ai/docs/migrate-v1)と
+[V2のツール仕様](https://opencode.ai/docs/tools/)も参照してください。
+
+## Javaプロジェクト向け拡張
+
+Java/JSPの位置付き診断、JUnitテキスト／XML、単純な `javac`／`ant` コマンドを認識します。
+複合shell、任意Javaクラス、古いテストレポートを自動的に検証成功へ昇格させません。
+Javaスタックがbasenameしか持たない場合、同名ファイルの対応を推測しません。
+
+文字の判別には `gal_inspect_text` を使えます。例:
+
+```json
+{"path":"src/Example.java","encoding":"utf-8","startLine":170,"lineCount":20}
+```
+
+UTF-8を厳密に復号し、bytes・U+XXXX・内容ハッシュ・改行形式を返します。不正なbyteは黙って置換しません。
+上限は入力1MiB、100行、表示2,000文字です。Windows-31J等は現在未対応です。
+Advisorのread/glob/grepと合わせて合計2観測までで、NEXTにも指定できます。
+V1は通常のtool contextの権限確認、V2は `permission.assert` を利用します。
+このAPIがないV2 SDK 2.0のホストでは新しい文字検査と下記の厳密完了判定を拒否し、従来の軽量モードを利用します。
+2.2.0の公式SDKにはこのAPIがあります。ホスト能力は `gal_status.capabilities` で確認できます。
+
+厳密な検証を使うには [.opencode/gal.example.json](.opencode/gal.example.json) を
+`.opencode/gal.json` へコピーし、実際のコマンド・対象ファイルへ変更してください。
+`paths` は検証結果の有効性に関わるソース、テスト、ビルド設定の**ファイルをすべて列挙**します。ディレクトリやglobは使えません。
+この例の検査対象パスはひな形です。そのまま実行するための設定ではありません。
+設定の未知キー・重複チェックID・曖昧な重複経路は起動時に拒否します。
+
+タスク開始時の登録例:
+
+```json
+{"goal":"タスク1.1を実装する","changePath":"openspec/changes/example","taskIDs":["1.1"],"requiredChecks":["unit"]}
+```
+
+これを `gal_report` へ渡します。モデルからPASSを申告する引数はありません。
+登録済みコマンドを実際に完了し、現在の対象内容に対するrequiredChecksがすべてPASS、かつ指定taskIDsが `[x]` の場合だけ完了ロックします。
+失敗0でもテスト0件、終了コードと結果の矛盾、実行中、対象内容の変更は成功扱いしません。
+再オープン後は訂正edit1回とrequiredChecksの再実行が必要です。
+
+外部ツール用チェックは `command` の代わりに `tool` と `match` を指定します。
+応答内の `exitPath`／`textPath`／`statePath` はドット区切りのフィールド経路です（既定 `exit`／`output`／`state`）。
+非同期実行では `executionIDPath`、別ツールでの完了取得には `resultTool` と `resultIDArg`（既定 `executionID`）を指定します。
+状態は `running`／`completed`／`failed`／`cancelled` に対応します。
+compileチェックの `errorsPath` は `severity: ERROR/WARNING/INFO` を持つ診断配列に対応します。
+Eclipseの実際の公開ツール名・引数・応答形式に合わせて設定してください。未登録ツールの応答や、観測できないexecute内部の結果をPASSへ流用しません。
+実機のEclipse応答は未確認です。
+
+## 生成中の通知
+
+V2で `.opencode/gal.json` の `generation.mode` を `notify` にすると、公開ライフサイクル情報だけで時間を計測します。
+既定の警告は180秒、主要求の上限通知は600秒、Advisorは180秒です。値は校正前の設定値です。
+通知はモデルを再開せず、生成そのものを止めません。既定modeは `off` です。
+`gal_status` で有効設定と監視状態を確認できます。イベント接続が失敗した場合も監視状態へ記録します。
+`interrupt` は取消の実機確認ができるまで起動時に拒否します。
+中断時のphase・NEXT・予算保持は内部状態処理として実装・試験済みですが、実際の取消・再開操作とは未接続です。
+
+設計・検討資料はローカルの `docs/` に保存し、Gitの管理対象から除外しています。

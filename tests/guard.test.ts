@@ -253,7 +253,7 @@ test('legacy persisted state migrates to a clean RUNNING episode without losing 
   const oldEvidenceCount=legacy.evidence.length;
   const migrated=new Guard(legacy);
   const status=migrated.status() as any;
-  assert.equal(migrated.s.schemaVersion,2);
+  assert.equal(migrated.s.schemaVersion,3);
   assert.equal(migrated.s.phase,'RUNNING');
   assert.equal(migrated.s.goal,'');
   assert.equal(migrated.s.problem,'');
@@ -361,7 +361,7 @@ test('investigation stall triggers on repeated low-novelty observations for one 
   for(let i=0;i<4;i++) {
     const args={filePath:'web/js/memory.js'};
     g.before('read',args);
-    g.observe('read',args,'line '+(230+i)+': queue state '+(9+i));
+    g.observe('read',args,'line '+(230+i)+': queue state unchanged');
   }
   assert.equal(g.s.phase,'REQUIRED');
   assert.equal(g.s.reason,'investigation_stall_no_new_evidence');
@@ -421,11 +421,11 @@ test('repeating the same empty glob query remains guarded by exact-repeat detect
 test('an edit resets low-novelty investigation history',()=> {
   const g=new Guard();
   g.report({goal:'Investigate then fix one issue'});
-  for(let i=0;i<3;i++) g.observe('read',{filePath:'src/focus.ts'},'line '+i+': same value '+i);
+  for(let i=0;i<3;i++) g.observe('read',{filePath:'src/focus.ts'},'line '+i+': same value');
   assert.equal(g.s.phase,'RUNNING');
   assert.equal(g.s.metrics.investigation_stale_observations,2);
   g.observe('edit',{filePath:'src/focus.ts'},'ok');
-  for(let i=0;i<3;i++) g.observe('read',{filePath:'src/focus.ts'},'line '+(10+i)+': same value '+(10+i));
+  for(let i=0;i<3;i++) g.observe('read',{filePath:'src/focus.ts'},'line '+(10+i)+': same value');
   assert.equal(g.s.phase,'RUNNING','a substantive edit starts a fresh investigation window');
 });
 
@@ -442,7 +442,7 @@ test('verified completion uses a stricter low-novelty investigation threshold',(
   for(let i=0;i<3;i++) {
     const args={filePath:'web/js/memory.js'};
     g.before('read',args);
-    g.observe('read',args,'line '+(300+i)+': indentation '+(8+i));
+    g.observe('read',args,'line '+(300+i)+': indentation unchanged');
   }
   assert.equal(g.s.phase,'REQUIRED');
   assert.equal(g.s.reason,'investigation_stall_no_new_evidence');
