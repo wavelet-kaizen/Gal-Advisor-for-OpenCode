@@ -92,6 +92,7 @@ RUNNING → REQUIRED → CONSULTING → CONTRACT → NEXT → NEXT_EXECUTING →
 1. 人間が `gal_report` を指示する必要はありません。主エージェントはread/glob/grep、`openspec list/status/show/instructions`、`openspec store list`、read-only Git確認で作業内容を理解できますが、
    goal未登録のまま最初のedit/write/patchまたはその他のbash検証へ進むとGuardが `GAL GOAL REQUIRED` でその1操作を止めます。
    主エージェント自身が `gal_report(goal=...)` で現在タスクを短く登録すると、そのままRUNNINGで再開できます。
+   通常登録の例は `{"goal":"現在のテスト失敗を確認する"}` です。`changePath`・`taskIDs`・`requiredChecks` はすべて省略します。通常登録のためのチェック設定追加は不要です。
    `gal_status` は既定でcompact表示（phase/reason/契約状態/current evidence summary/metrics）だけを返します。
    永続state全体が明示的に必要な診断時だけ `gal_status` の `raw: true` を使用してください。
 2. Guardが停止したら `task` の `subagent_type: gal-advisor`（2.xでは `subagent` の `agent: gal-advisor`）を呼びます。
@@ -108,6 +109,10 @@ RUNNING → REQUIRED → CONSULTING → CONTRACT → NEXT → NEXT_EXECUTING →
    以後はread/grep/glob、read-only Git/OpenSpec discovery、認識済みverificationだけを許可し、edit/write/patchとad-hoc bashを停止します。
    本物の欠陥を新たに見つけた場合はcheckpoint後のevidence IDを集め、`gal_reopen(reason,evidence)` で明示的に再開します。reopenで許可される訂正editは1回だけで、その後は認識済みverificationが必須です。PASSならcheckpointを再設定し、FAILならcheckpointを解除して通常デバッグへ戻します。
 
+制御ツールが明示的に返す入力検証エラーは `GAL CONTROL INPUT ERROR` として、修正方法とphaseが変わっていないことを表示します。同じtool・エラー種別で2回失敗すると `GAL CONTROL INPUT REPEAT` を表示し、その無効な要求の再試行を止めるよう案内します。
+これは通常の失敗停止とは別の**非ブロッキングの案内**です。`REQUIRED` / `EXHAUSTED` へ移さず、NEXT契約・completion gate・相談予算も変更しません。案内を消すための追加相談は不要です。現在のphaseで許可された訂正・観測・元の作業は続けられます。
+診断は `gal_status.controlInputs` に保持し、再読み込み後も表示します。該当操作が成功すると消え、ACCEPT/REJECTはどちらかの成功で両方の案内が消えます。phase遷移等でその制御操作が使えなくなった場合も古い案内を破棄し、不要な制御呼び出しへ誘導しません。権限・インフラのエラーや通常のGuard拒否はこの入力カウンターに混ぜません。ホストが実行前に拒否するschemaエラーはこのカウンターの対象外です。
+
 同じ問題の相談は最大2回です。問題キーは現在のfailure種別・診断・ファイル・位置から作り、独立したfailureへ変わると新しいepisodeと相談予算になります。
 同じ問題で前回と観測証拠が同じなら再相談を拒否しEXHAUSTEDにします。
 再読み込み・コンパクションで予算を忘れないよう、プロジェクトの `.gal-state/` にセッション別状態を保存します。
@@ -123,7 +128,8 @@ EXHAUSTEDからモデル自身が解除するツールはありません。ユ�
 
 | 条件 | 実装 |
 |---|---|
-| 同じtool/inputの失敗2回 | 自動。例外はtool errorイベント、bashは終了コード・一般的なエラー表記を利用 |
+| 同じtool/inputの失敗2回 | 自動。例外はtool errorイベント、bashは終了コード・一般的なエラー表記を利用。Gal制御ツールは別扱い |
+| Gal制御ツールの入力検証エラー反復 | 同じtool・エラー種別で2回なら訂正案内。phase変更・追加ブロック・相談予算消費なし |
 | 同じfailureが修正後も継続 | 自動。failure種別・診断・ファイル・約10行単位の位置・コマンドfamilyで比較。コード検証failureだけを修正回数判定に使う |
 | 編集3回で進展なし | 自動。failureで示されたファイルに関係するedit/write/patchだけを集計。無関係な編集は修正回数に含めない |
 | CLI/host shellの取り違え | `unknown option` やPowerShell上のPOSIXコマンド不整合を分類し、ソース編集ではなくコマンド修正を促すNOTEを返す |
@@ -183,7 +189,7 @@ verified completion後の再編集停止・fresh evidenceによるgal_reopen・�
 
 `gal_status` のmetricsにはtool_calls、triggers、progress、gal_invocations、
 advisor_accept/reject/repair、advisor_exhausted、recovery_starts、recovery_observations、next_contract_mismatches、
-state_repairs、state_migrations、goal_gate_blocks、verification_passes、completion_markers、completion_checkpoints、post_success_blocks、completion_reopens、completion_reopen_edits、completion_invalidated、investigation_novel_observations、investigation_stale_observations、investigation_stall_triggers、unrelated_edits、shell_mismatches、cli_usage_errorsを記録します。
+state_repairs、state_migrations、goal_gate_blocks、verification_passes、completion_markers、completion_checkpoints、post_success_blocks、completion_reopens、completion_reopen_edits、completion_invalidated、investigation_novel_observations、investigation_stale_observations、investigation_stall_triggers、unrelated_edits、shell_mismatches、cli_usage_errors、control_input_errors、control_input_repeatsを記録します。
 false_positive判定や解決率は自動推定しません。
 
 ## API根拠
@@ -221,13 +227,15 @@ V1は通常のtool contextの権限確認、V2は `permission.assert` を利用�
 この例の検査対象パスはひな形です。そのまま実行するための設定ではありません。
 設定の未知キー・重複チェックID・曖昧な重複経路は起動時に拒否します。
 
-タスク開始時の登録例:
+厳密完了判定を選ぶ場合の登録例（通常のgoal登録には不要）:
 
 ```json
 {"goal":"タスク1.1を実装する","changePath":"openspec/changes/example","taskIDs":["1.1"],"requiredChecks":["unit"]}
 ```
 
 これを `gal_report` へ渡します。モデルからPASSを申告する引数はありません。
+`changePath` は `tasks.md` を持つchangeディレクトリです。Javaファイルなどの修正対象パスではありません。3項目のいずれかを指定したらすべて必須となり、`requiredChecks` は設定済みIDを指定します。
+登録前にホスト能力・チェックID・tasks.mdの存在と選択taskIDを検証します。入力エラーや読み取り拒否で失敗した場合は、goalや厳密登録を部分的に残しません。既存の厳密登録を再指定した場合も、その登録と検証結果を保持して引数の訂正を案内します。
 登録済みコマンドを実際に完了し、現在の対象内容に対するrequiredChecksがすべてPASS、かつ指定taskIDsが `[x]` の場合だけ完了ロックします。
 失敗0でもテスト0件、終了コードと結果の矛盾、実行中、対象内容の変更は成功扱いしません。
 再オープン後は訂正edit1回とrequiredChecksの再実行が必要です。

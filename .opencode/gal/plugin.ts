@@ -6,6 +6,7 @@ import { join } from 'node:path';
 import { loadConfig, type Config } from './config.ts';
 import { inspectText, type Authorize } from './inspect.ts';
 import { ProjectRuntime } from './runtime.ts';
+import { ControlInputError, normalGoalHelp, strictHelp } from './control.ts';
 
 // Keep persisted state canonical when switching between V1 and V2 hosts.
 export function canonicalMove(move:Move):Move {
@@ -54,11 +55,21 @@ export async function createGuardHooks(directory:string, lookupAdvisor:(id:strin
         guards.set(id,g);
       }
       try {return await action(g);}
-      finally {await mkdir(root,{recursive:true});await writeFile(path+'.tmp',JSON.stringify(g.s));await rename(path+'.tmp',path);}
+      finally {g.pruneControlInputs();await mkdir(root,{recursive:true});await writeFile(path+'.tmp',JSON.stringify(g.s));await rename(path+'.tmp',path);}
     });
     queue=run.catch(()=>{});return run;
   };
   const advisorSessions=new Set<string>();
+  // Input feedback is deliberately separate from observe()/trigger(): a malformed
+  // control request must never create a recovery episode or consume its budget.
+  const control=(sessionID:string,name:string,action:(g:Guard)=>unknown|Promise<unknown>,render=(g:Guard)=>serialize(g.status()))=>transaction(sessionID,async g=>{
+    try {
+      await action(g);g.controlInputSuccess(name);return render(g);
+    } catch(error) {
+      if(error instanceof ControlInputError) throw Error(notice(g.controlInputError(name,error)));
+      throw error;
+    }
+  });
   const failedCalls=new Set<string>();
   async function isAdvisor(id:string) {
     if(advisorSessions.has(id)) return true;
@@ -77,41 +88,45 @@ export async function createGuardHooks(directory:string, lookupAdvisor:(id:strin
         });
         return JSON.stringify(await inspectText(directory,args,ctx.sessionID,authorize));
       }}),
-      gal_report: tool({description:'Report goal, evidence-backed hypothesis or visible loop signal. Never report hidden reasoning.',args:{
+      gal_report: tool({description:'Report one current goal, evidence-backed hypothesis or visible loop signal. '+strictHelp+' Never report hidden reasoning.',args:{
         goal:tool.schema.string().optional(),hypothesis:tool.schema.string().optional(),
-        changePath:tool.schema.string().min(1).optional(),taskIDs:tool.schema.array(tool.schema.string().min(1)).min(1).optional(),requiredChecks:tool.schema.array(tool.schema.string().min(1)).min(1).optional(),
+        changePath:tool.schema.string().min(1).describe('Optional strict-completion registration only: OpenSpec change DIRECTORY containing tasks.md, not a source file. Omit for normal goal registration. Requires taskIDs and requiredChecks.').optional(),
+        taskIDs:tool.schema.array(tool.schema.string().min(1)).min(1).describe('Selected tasks.md IDs for optional strict completion. Requires changePath and requiredChecks.').optional(),
+        requiredChecks:tool.schema.array(tool.schema.string().min(1)).min(1).describe('Configured check IDs from .opencode/gal.json, not commands or invented labels. Optional strict completion only; requires changePath, taskIDs and a permission-capable V2 host.').optional(),
         status:tool.schema.enum(['SUPPORTED','REFUTED','UNTESTED']).optional(),
         evidence:tool.schema.array(tool.schema.string()).optional(),
         signal:tool.schema.enum(['manual_verification','contradicted_baseline','advisor_approach_reuse','speculation','narrative_debugging','scope_drift','semantic_loop','assumption_lock','blast_radius']).optional(),
-      },async execute(args,ctx){return transaction(ctx.sessionID,g=>{
-        if(args.requiredChecks&&(!authorizeRead||args.requiredChecks.some(id=>!config.checks.some(c=>c.id===id)))) throw Error('GAL requiredChecks need registered checks and V2 host read permission support');
-        g.report(args);return serialize(g.status());
+      },async execute(args,ctx){return control(ctx.sessionID,'gal_report',async g=>{
+        g.validateReport(args);
+        if(args.requiredChecks) {
+          if(!authorizeRead) throw new ControlInputError('strict_registration','Strict completion is unavailable: this host lacks the V2 read permission API. Normal goal registration is available.',normalGoalHelp);
+          if(args.requiredChecks.some(id=>!config.checks.some(c=>c.id===id))) throw new ControlInputError('strict_registration','Strict completion requires registered check IDs; available IDs: '+(config.checks.map(c=>c.id).join(', ')||'(none)')+'.',strictHelp);
+          await runtime.validateRegistration(args.changePath!,args.taskIDs!,ctx.sessionID);
+        }
+        g.report(args);
       });}}),
       gal_reopen: tool({description:'Reopen a task after GAL recorded verified completion. Requires a concrete reason and evidence IDs produced after the completion checkpoint. Use only for a newly observed defect, not cosmetic speculation.',args:{
         reason:tool.schema.string(),evidence:tool.schema.array(tool.schema.string()),
-      },async execute(args,ctx){return transaction(ctx.sessionID,g=>{g.reopen(args.reason,args.evidence);return 'GAL REOPEN\n'+serialize(g.status());});}}),
+      },async execute(args,ctx){return control(ctx.sessionID,'gal_reopen',g=>g.reopen(args.reason,args.evidence),g=>'GAL REOPEN\n'+serialize(g.status()));}}),
       gal_accept: tool({description:'Accept the Advisor NEXT MOVE. Supply only reason and current-episode evidence IDs; the stored Advisor NEXT is used automatically.',args:{
         reason:tool.schema.string(),evidence:tool.schema.array(tool.schema.string()),
-      },async execute(args,ctx){return transaction(ctx.sessionID,g=>{
+      },async execute(args,ctx){return control(ctx.sessionID,'gal_accept',g=>{
         g.contract('ACCEPT',args.reason,args.evidence,{tool:'',args:{}});
-        return 'GAL ACCEPT\nPHASE=NEXT\nEXECUTE EXACTLY: '+serialize(g.s.move);
-      });}}),
+      },g=>'GAL ACCEPT\nPHASE=NEXT\nEXECUTE EXACTLY: '+serialize(g.s.move));}}),
       gal_reject: tool({description:notice('Reject the Advisor NEXT MOVE using objective evidence and contract one different valid observation. read {'+(v2?'path':'filePath')+'}; glob {pattern,path?}; grep {pattern,path?,include?}; bash only simple git diff/status/show/log.'),args:{
         reason:tool.schema.string(),evidence:tool.schema.array(tool.schema.string()),
         next_tool:tool.schema.enum(nextTools),next_args:tool.schema.record(tool.schema.string(),tool.schema.unknown()),
-      },async execute(args,ctx){return transaction(ctx.sessionID,g=>{
+      },async execute(args,ctx){return control(ctx.sessionID,'gal_reject',g=>{
         const move={tool:args.next_tool,args:args.next_args};
         g.contract('REJECT',args.reason,args.evidence,v2?canonicalMove(move):move);
-        return 'GAL REJECT\nPHASE=NEXT\nEXECUTE EXACTLY: '+serialize(g.s.move);
-      });}}),
+      },g=>'GAL REJECT\nPHASE=NEXT\nEXECUTE EXACTLY: '+serialize(g.s.move));}}),
       gal_repair: tool({description:'Repair only a NEXT_EXECUTING observation whose correct tool visibly returned a tool/schema/infrastructure error but no completion event. Contract one different valid observation.',args:{
         reason:tool.schema.string(),evidence:tool.schema.array(tool.schema.string()),
         next_tool:tool.schema.enum(nextTools),next_args:tool.schema.record(tool.schema.string(),tool.schema.unknown()),
-      },async execute(args,ctx){return transaction(ctx.sessionID,g=>{
+      },async execute(args,ctx){return control(ctx.sessionID,'gal_repair',g=>{
         const move={tool:args.next_tool,args:args.next_args};
         g.repair(args.reason,args.evidence,v2?canonicalMove(move):move);
-        return 'GAL REPAIR\nPHASE=NEXT\nEXECUTE EXACTLY: '+serialize(g.s.move);
-      });}}),
+      },g=>'GAL REPAIR\nPHASE=NEXT\nEXECUTE EXACTLY: '+serialize(g.s.move));}}),
     },
     'tool.execute.before':async(input,output)=>{
       if(await isAdvisor(input.sessionID)) {
@@ -164,6 +179,11 @@ export async function createGuardHooks(directory:string, lookupAdvisor:(id:strin
     'experimental.chat.system.transform':async(input,output)=>{
       if(!input.sessionID||await isAdvisor(input.sessionID)) return;
       await transaction(input.sessionID,g=>{
+        const controlNotice=g.controlInputNotice();
+        if(controlNotice) {
+          if(output.system.length>0) output.system[output.system.length-1]+='\n'+notice(controlNotice);
+          else output.system.push(notice(controlNotice));
+        }
         if(g.s.phase==='RUNNING'&&g.s.completion) {
           const reopen=g.s.completionReopen;
           const msg=reopen

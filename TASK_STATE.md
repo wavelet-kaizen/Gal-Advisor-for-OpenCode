@@ -1,26 +1,25 @@
-# Reviewed loop-recovery extensions: implementation state
+# Control input recovery: implementation state
 
-Goal: implement docs/loop-recovery-java-generation-spec.md, preserving OpenCode 1.18.31 and V2. Single agent. Existing user changes, including .gitignore, preserved. No Gal control tools in this session; goal/recovery evidence was recorded visibly.
+Goal: prevent the reported goal-registration loop while keeping Gal control-input failures from blocking the main agent or exhausting recovery budgets. User explicitly cautioned against restoring past self-locks. Single agent; no Gal control tools available in this Codex session, so goal and evidence were recorded visibly.
 
-Implemented:
-- verification.ts: Java/JSP locations; JUnit text/XML; conservative javac/Ant verification; conflicting/missing/zero-test results cannot pass.
-- config.ts/runtime.ts: validated .opencode/gal.json, registered shell/external-tool routes, asynchronous execution IDs and persisted deduplication, source/config-definition hashes, selected taskIDs/requiredChecks, stale-result invalidation.
-- inspect.ts: permission-checked canonical-path bounded strict UTF-8 byte/codepoint inspection, integrated into NEXT and the Advisor two-observation budget.
-- Guard schema 3 preserves schema-2 history/budgets; strict completion and one-edit/reverify recovery; preserves semantic numeric/hex evidence and ignores unrelated edits for investigation reset.
-- Generation holds preserve phase/NEXT/budgets on reload and do not roll back late results. Notification adapter uses public lifecycle metadata, avoids auto-resuming the model and cleans up subscriptions/timers.
-- Agent/AGENTS instructions, full-folder installation docs, example config, implementation coverage and SDK CI matrix updated.
+Decisions / implementation:
+- Normal goal registration uses only goal. Tool descriptions, argument schemas, README and AGENTS distinguish the optional strict changePath/taskIDs/requiredChecks registration. changePath is the OpenSpec directory containing tasks.md.
+- Explicit ControlInputError validation failures from report/accept/reject/repair/reopen have separate advisory diagnostics. Same tool/code twice produces GAL CONTROL INPUT REPEAT with a concrete correction. This does not call observe/trigger, create an episode, change phase/contracts/completion/holds, consume consultations or add tool restrictions.
+- Diagnostics persist across reload; successful correction clears them. Either contract decision clears ACCEPT/REJECT diagnostics. Transactions retire advice when phase/completion changes make that control unavailable, including late NEXT completion.
+- Ordinary guard refusals, infrastructure/permission errors and host schema rejections remain excluded from this counter. Original recovery gates and consultation limits still apply.
+- Strict registration prevalidates capabilities, configured IDs, tasks.md and selected tasks. Report validates all arguments before assigning goal/immutable state, preventing partial registration on failure. Existing strict state and verification results are preserved on rejected re-registration.
 
-Checks:
-- Initial baseline: 70/70 tests passed.
-- Final source, tested in root with SDK2.0.0 and isolated .runtime copies with SDK2.2.0/2.3.0: all 86 tests passed in each; typecheck passed in each.
-- Bun entrypoint import passed. git diff --check passed.
-- Official v2.2.0 permission source confirms permission.assert. Runtime capability detection preserves old hosts and fails closed for new permission-dependent functionality.
-- Interim failures were resolved with objective progress: type collisions/missing API; Node strip-only constructor syntax; host-level strict reopen prematurely re-arming. No unresolved test failures, no consultations, no OpenSpec completion checkpoint.
+Changed files:
+- .opencode/gal/control.ts (new), guard.ts, plugin.ts, runtime.ts
+- tests/control.test.ts (new, 8 regression tests)
+- README.md, AGENTS.md, TASK_STATE.md
 
-Limits / next integration inputs:
-- Actual Eclipse response schemas and a real OpenCode2.2 patch + Strata cancellation confirmation are unavailable. External adapters are configured and fixture-tested; no real Eclipse/Strata session exercised.
-- Generation interrupt mode is rejected. Holds are internal tested foundations, not a connected cancellation/resume feature. Notification mode is optional (default off), advisory and not proof of semantic looping. No hidden reasoning content is processed.
-- V2 hosts lacking permission.assert cannot use the new inspection/strict completion; V1 inspection uses ToolContext.ask. Only strict UTF-8 decoding is implemented; unknown dump provenance is not inferred.
-- Root dependencies stay pinned. Isolated SDK projects and logs are ignored. Next substantive work requires real host/tool integration evidence for the explicitly gated functionality.
+Validation:
+- Final complete suite: 94/94 passed with SDK 2.0.0 (root), 2.2.0 and 2.3.0 (existing isolated .runtime copies).
+- TypeScript typecheck passed in all three environments. Final outputs are in ignored .runtime/control-root-final-*.log and .runtime/sdk-2.{2,3}.0/control-final-*.log.
+- Initial permission-fixture failure was corrected by creating tasks.md before testing authorization. A regression test reproduced stale repair advice after late completion; transaction-level diagnostic pruning fixed it. No unresolved test failures or consultations.
+- Root dependencies and SDK versions unchanged. Isolated source copies/logs are ignored.
 
-User requested committing the implementation with docs/ ignored. Added docs/ to .gitignore, preserved the existing tmp/ exclusion, and removed the README link to the untracked local specification. Commit scope includes implementation, tests, CI, setup documentation and this handoff; local docs/logs/dependency caches are excluded. No runtime changes after the verified 86-test SDK matrix.
+Limits / next step:
+- Tests exercise shared hooks and V1/V2 adapter fixtures, not a live OpenCode session. Existing Eclipse/Strata integration limits remain.
+- User requested committing this improvement. Commit scope includes the implementation, regression tests, README, AGENTS instructions and this handoff. No additional implementation is pending; deployment has not been requested. When installing, copy the full .opencode/gal folder (including control.ts), the plugin, and updated instructions as documented.

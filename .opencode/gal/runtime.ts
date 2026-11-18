@@ -3,12 +3,26 @@ import { Guard, hash } from './guard.ts';
 import { type Config, type Check, field } from './config.ts';
 import { readAuthorized, type Authorize } from './inspect.ts';
 import { verify, type Verification } from './verification.ts';
+import { ControlInputError, strictHelp } from './control.ts';
 
 export class ProjectRuntime {
   readonly directory:string;readonly config:Config;private authorize?:Authorize;
   constructor(directory:string,config:Config,authorize?:Authorize) {this.directory=directory;this.config=config;this.authorize=authorize;}
   matches(tool:string,args:Record<string,unknown>) {
     return this.config.checks.find(c=>c.command!==undefined?tool==='bash'&&args.command===c.command:c.tool===tool&&Object.entries(c.match).every(([k,v])=>args[k]===v));
+  }
+  async validateRegistration(changePath:string,taskIDs:string[],sessionID:string) {
+    if(!this.authorize) throw Error('GAL strict completion requires host read permission support (V2)');
+    let tasks;
+    try {tasks=await readAuthorized(this.directory,join(changePath,'tasks.md'),sessionID,this.authorize);} catch(error) {
+      if(['ENOENT','ENOTDIR'].includes((error as NodeJS.ErrnoException).code??'')) throw new ControlInputError('strict_registration','changePath must be an existing OpenSpec change directory containing tasks.md; no task was registered.',strictHelp);
+      throw error;
+    }
+    const text=new TextDecoder('utf-8',{fatal:true}).decode(tasks.bytes);
+    for(const id of taskIDs) {
+      const pattern=new RegExp('^\\s*- \\[[ xX]\\] '+id.replace(/[.*+?^${}()|[\]\\]/g,'\\$&')+'(?:\\s|$)');
+      if(text.split(/\r?\n/).filter(line=>pattern.test(line)).length!==1) throw new ControlInputError('strict_registration','Each selected taskID must occur exactly once in changePath/tasks.md; no task was registered.',strictHelp);
+    }
   }
   private async snapshot(check:Check,sessionID:string) {
     if(!this.authorize) throw Error('GAL strict verification requires host read permission support (V2)');

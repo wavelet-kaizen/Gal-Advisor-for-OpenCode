@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto';
+import { ControlInputError, normalGoalHelp, strictHelp } from './control.ts';
 import { diagnostic as javaDiagnostic, junit, simpleVerification, verify, type Verification } from './verification.ts';
 
 export const hash = (v: unknown): string => createHash('sha256').update(stable(v)).digest('hex');
@@ -198,6 +199,7 @@ function diagnosticLine(clean:string,error:string|undefined,failedCount:number|u
   return lines.find(x=>/^(?:error|fatal|panic|failed|failure|usage:)/i.test(x)||/(?:unknown|unrecognized) (?:option|argument)|command not found|not recognized/i.test(x))??lines[0]??'nonzero';
 }
 
+export type ReportInput = {goal?:string;hypothesis?:string;status?:string;evidence?:string[];signal?:string;changePath?:string;taskIDs?:string[];requiredChecks?:string[]};
 export type State = {
   schemaVersion: number;
   phase: Phase;
@@ -218,6 +220,7 @@ export type State = {
   strict?: {changePath:string;taskIDs:string[];requiredChecks:string[];done:boolean;checks:Record<string,{verdict:string;digest:string;scope:string;revision:number}>};
   executions?: Record<string,{executionKey:string;checkID:string;digest:string;args:Record<string,unknown>;revision:number;finished?:boolean}>;
   generationHold?: {requestID:string;incidentID:string;phase:Phase;status:'pending'|'confirmed'|'unknown';reason:string};
+  controlInputs?: Record<string,{code:string;count:number;message:string;nextAction:string}>;
   metrics: Record<string,number>;
 };
 export const initial = (): State => ({
@@ -333,6 +336,7 @@ export class Guard {
       lastVerification:this.s.lastVerification,
       strict:this.s.strict,
       generationHold:this.s.generationHold,
+      controlInputs:this.s.controlInputs,
       investigation:this.investigationSummary(),
       episodeStartTick:this.s.episodeStartTick,
       evidenceCount:evidence.length,
@@ -431,13 +435,58 @@ export class Guard {
     if(this.s.phase!=='RUNNING'||!this.s.completion) throw Error('GAL REOPEN is available only after a verified completion checkpoint');
     if(this.s.completionReopen) throw Error('GAL REOPEN is already active; use the authorized edit or run verification');
     const after=this.s.evidence.filter(e=>evidenceTick(e)>this.s.completion!.tick);
-    if(!reason.trim()||evidence.length===0||!evidence.every(id=>after.some(e=>e.id===id))) throw Error('GAL REOPEN requires a reason and evidence produced after the completion checkpoint');
+    if(!reason.trim()||evidence.length===0||!evidence.every(id=>after.some(e=>e.id===id))) throw new ControlInputError('reopen_evidence','GAL REOPEN requires a reason and evidence produced after the completion checkpoint','Use gal_status to select evidence IDs produced after completion and provide a concrete reason. Cosmetic speculation does not authorize reopening.');
     this.s.completionReopen={tick:this.s.tick,evidence:[...evidence],editUsed:false};this.metric('completion_reopens');
   }
-  report(input:{goal?:string; hypothesis?:string; status?:string; evidence?:string[]; signal?:string;changePath?:string;taskIDs?:string[];requiredChecks?:string[]}) {
+  controlInputError(tool:string,error:ControlInputError) {
+    const inputs=this.s.controlInputs??={};
+    const prior=inputs[tool];
+    const count=prior?.code===error.code?Math.min(prior.count+1,100):1;
+    inputs[tool]={code:error.code,count,message:error.message.slice(0,500),nextAction:error.nextAction};
+    this.metric('control_input_errors');
+    if(count===2) this.metric('control_input_repeats');
+    return 'GAL CONTROL INPUT ERROR ['+error.code+']: '+error.message+'\nphase_unchanged='+this.s.phase+'; attempt='+count+'\n'+
+      (count>=2?this.controlInputNotice(false)+'\n':'')+'NEXT: '+error.nextAction;
+  }
+  controlInputSuccess(tool:string) {
+    const inputs=this.s.controlInputs;
+    if(!inputs) return;
+    delete inputs[tool];
+    // Either decision resolves errors in the alternative contract decision too.
+    if(tool==='gal_accept'||tool==='gal_reject') {delete inputs.gal_accept;delete inputs.gal_reject;}
+    if(!Object.keys(inputs).length) this.s.controlInputs=undefined;
+  }
+  pruneControlInputs() {
+    const inputs=this.s.controlInputs;
+    if(!inputs) return;
+    for(const tool of Object.keys(inputs)) {
+      const available=tool==='gal_report'?this.s.phase==='RUNNING':
+        tool==='gal_reopen'?this.s.phase==='RUNNING'&&Boolean(this.s.completion):
+        tool==='gal_repair'?this.s.phase==='NEXT_EXECUTING':this.s.phase==='CONTRACT';
+      if(!available) delete inputs[tool];
+    }
+    if(!Object.keys(inputs).length) this.s.controlInputs=undefined;
+  }
+  controlInputNotice(includeActions=true) {
+    const repeated=Object.entries(this.s.controlInputs??{}).filter(([,input])=>input.count>=2);
+    if(!repeated.length) return '';
+    return 'GAL CONTROL INPUT REPEAT: stop retrying the invalid control request. This advisory adds no tool restrictions and requires no additional Advisor consultation. Existing phase gates, contracts and consultation budgets still apply.'+
+      (includeActions?'\n'+repeated.map(([tool,input])=>tool+' ['+input.code+']: '+input.nextAction).join('\n'):'');
+  }
+  validateReport(input:ReportInput) {
     if(input.changePath||input.taskIDs||input.requiredChecks) {
-      if(this.s.strict) throw Error('GAL strict task registration is immutable; start a new session for another task');
-      if(!input.changePath||!input.taskIDs?.length||!input.requiredChecks?.length) throw Error('GAL strict completion requires changePath, taskIDs and requiredChecks');
+      if(this.s.strict) throw new ControlInputError('strict_registration','GAL strict task registration is immutable; the existing registration is preserved.','Omit changePath, taskIDs and requiredChecks when reporting on the current task. Use gal_status to inspect its existing registration.');
+      if(!input.changePath||!input.taskIDs?.length||!input.requiredChecks?.length) throw new ControlInputError('strict_registration','GAL strict completion requires changePath, taskIDs and requiredChecks.',strictHelp);
+    }
+    const old=input.hypothesis?this.s.hypotheses[input.hypothesis]:undefined;
+    if(input.hypothesis&&!(old?.status==='REFUTED'&&input.status!=='REFUTED')&&input.status!=='UNTESTED'&&!this.refs(input.evidence??[],true)) {
+      throw new ControlInputError('hypothesis_evidence','Current-problem evidence IDs required.','Use evidence IDs from gal_status for SUPPORTED/REFUTED hypotheses, or explicitly report status=UNTESTED without evidence. '+normalGoalHelp);
+    }
+  }
+  report(input:ReportInput) {
+    // Validate the whole request before assigning a goal or immutable strict task.
+    this.validateReport(input);
+    if(input.changePath&&input.taskIDs&&input.requiredChecks) {
       this.s.strict={changePath:input.changePath,taskIDs:input.taskIDs,requiredChecks:input.requiredChecks,done:false,checks:{}};
       this.s.completion=undefined;
     }
@@ -446,7 +495,6 @@ export class Guard {
       const old=this.s.hypotheses[input.hypothesis];
       if(old?.status==='REFUTED'&&input.status!=='REFUTED') this.trigger('contradicted_hypothesis_reuse');
       else {
-        if(input.status!=='UNTESTED'&&!this.refs(input.evidence??[],true)) throw Error('Current-problem evidence IDs required');
         this.s.hypotheses[input.hypothesis]={status:input.status??'UNTESTED',evidence:input.evidence??[]};
       }
     }
@@ -484,22 +532,27 @@ export class Guard {
       this.s.advisorMoveError=e instanceof Error?e.message:String(e);this.metric('advisor_invalid_moves');
     }
   }
+  private validateControlMove(move:Move) {
+    try {validateMove(move);} catch(error) {
+      throw new ControlInputError('invalid_observation',error instanceof Error?error.message:String(error),'Use the documented native read/grep/glob arguments or a simple read-only git command for one observation. Correct the current contract arguments; do not invoke another Advisor or use REPAIR for a NEXT mismatch.');
+    }
+  }
   contract(decision:string,reason:string,evidence:string[],move:Move) {
     if(this.s.phase!=='CONTRACT') throw Error('No pending recovery contract');
-    if(!reason.trim()||!this.refs(evidence,true)) throw Error('Reason and current-problem evidence IDs required');
+    if(!reason.trim()||!this.refs(evidence,true)) throw new ControlInputError('contract_evidence','Reason and current-problem evidence IDs required','Use a non-empty reason and current-problem evidence IDs from gal_status. Keep the pending contract; do not request another consultation to correct these arguments.');
     if(!['ACCEPT','REJECT'].includes(decision)) throw Error('ACCEPT or REJECT required');
-    if(decision==='ACCEPT'&&!this.s.recommended) throw Error('Advisor NEXT MOVE is invalid or unavailable'+(this.s.advisorMoveError?': '+this.s.advisorMoveError:'')+'. Use REJECT with a valid observation.');
+    if(decision==='ACCEPT'&&!this.s.recommended) throw new ControlInputError('invalid_advisor_move','Advisor NEXT MOVE is invalid or unavailable'+(this.s.advisorMoveError?': '+this.s.advisorMoveError:'')+'. Use REJECT with a valid observation.','Use gal_reject with current evidence and one different valid read/grep/glob or read-only git observation. Do not retry gal_accept or call gal_repair.');
     const effective=decision==='ACCEPT'?this.s.recommended!:move;
-    validateMove(effective);
-    if(decision==='REJECT'&&this.s.recommended&&hash(effective)===hash(this.s.recommended)) throw Error('REJECT requires a different observation');
-    if(this.s.previousMove&&matchesMove(effective,this.s.previousMove.tool,this.s.previousMove.args)) throw Error('NEXT must differ from the previous stalled operation');
+    this.validateControlMove(effective);
+    if(decision==='REJECT'&&this.s.recommended&&hash(effective)===hash(this.s.recommended)) throw new ControlInputError('same_observation','REJECT requires a different observation','Choose a different valid observation for gal_reject, or use gal_accept to accept the Advisor NEXT unchanged.');
+    if(this.s.previousMove&&matchesMove(effective,this.s.previousMove.tool,this.s.previousMove.args)) throw new ControlInputError('same_observation','NEXT must differ from the previous stalled operation','Choose a valid observation different from the previous stalled operation; preserve the current recovery episode.');
     this.s.move=effective;this.s.executing=undefined;this.s.phase='NEXT';this.metric('advisor_'+decision.toLowerCase());
   }
   repair(reason:string,evidence:string[],move:Move) {
     if(this.s.phase!=='NEXT_EXECUTING') throw Error('REPAIR is only available after a contracted observation started but no completion was observed');
-    if(!reason.trim()||!this.refs(evidence,true)) throw Error('REPAIR requires a reason and current-problem evidence IDs');
-    validateMove(move);
-    if(this.s.executing&&matchesMove(move,this.s.executing.tool,this.s.executing.args)) throw Error('REPAIR must choose a different observation');
+    if(!reason.trim()||!this.refs(evidence,true)) throw new ControlInputError('repair_evidence','REPAIR requires a reason and current-problem evidence IDs','Use current-problem evidence IDs from gal_status and a concrete infrastructure-error reason. REPAIR applies only to an executing contracted observation with no completion hook.');
+    this.validateControlMove(move);
+    if(this.s.executing&&matchesMove(move,this.s.executing.tool,this.s.executing.args)) throw new ControlInputError('same_observation','REPAIR must choose a different observation','Choose a valid observation different from the executing observation. Preserve the current episode and consultation budget.');
     this.s.move=move;this.s.executing=undefined;this.s.phase='NEXT';this.metric('advisor_repair');
   }
   before(tool:string,args:Record<string,unknown>,configuredVerification=false) {
